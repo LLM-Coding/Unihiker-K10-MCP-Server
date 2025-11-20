@@ -1,0 +1,330 @@
+= Solution Strategy
+:toc:
+
+== Overview
+
+This document captures the **top 5 architecture decisions** that define the K10 MCP Server's design. Each decision shaped the system's character and constraints.
+
+[quote, Peter Naur]
+The program is the theory in the developer's mind, not the code.
+
+== Top 5 Architecture Decisions
+
+=== Decision 1: HTTP Transport Over SSE/Stdio
+
+[cols="1,3",options="header"]
+|===
+|Aspect |Details
+
+|**Context**
+|MCP spec supports 3 transports: stdio, SSE, HTTP. Embedded device has no stdin/stdout process model like desktop apps.
+
+|**Decision**
+|Use **HTTP streamable transport** with single `/mcp` endpoint for all JSON-RPC messages.
+
+|**Rationale**
+a|
+* **stdio:** Requires process spawning (not applicable to embedded)
+* **SSE:** Bidirectional emulation complex, poor error handling in MicroPython
+* **HTTP:** Simplest, stateless, well-understood, native MicroPython support
+
+|**Consequences**
+a|
+✅ *Positive:*
+
+* Simple implementation (~50 lines for endpoint)
+* Easy debugging with `curl` or Postman
+* Works with existing MicroPython HTTP libraries
+
+❌ *Negative:*
+
+* Higher latency than WebSocket (each request = new HTTP round-trip)
+* No server-initiated notifications (can't push sensor alerts)
+* Poll-based sensor reading only
+
+|**Alternatives Considered**
+a|
+1. **SSE (Server-Sent Events):**
+   - *Problem:* MicroPython SSE libraries immature, complex keep-alive
+   - *Why rejected:* Tried in v0.1-0.2, unreliable connections
+
+2. **WebSocket:**
+   - *Problem:* Requires asyncio WebSocket library (larger memory footprint)
+   - *Why rejected:* Save for v1.0+ when bidirectional is critical
+
+3. **MQTT:**
+   - *Problem:* Non-standard for MCP, requires broker
+   - *Why rejected:* Adds infrastructure dependency
+|===
+
+=== Decision 2: Single Endpoint vs Multi-Route Design
+
+[cols="1,3",options="header"]
+|===
+|Aspect |Details
+
+|**Context**
+|Early designs had separate routes: `/initialize`, `/tools/list`, `/tools/call`. JSON-RPC 2.0 is method-agnostic.
+
+|**Decision**
+|Single `/mcp` endpoint handles all JSON-RPC methods.
+
+|**Rationale**
+a|
+* JSON-RPC already has `method` field for dispatch
+* Reduces routing complexity in Microdot
+* Follows JSON-RPC 2.0 best practices (method dispatch in payload)
+* Easier CORS handling (one OPTIONS endpoint)
+
+|**Consequences**
+a|
+✅ *Positive:*
+
+* Simpler URL config in Claude Desktop (`url: "http://IP:8080/mcp"`)
+* All MCP logic in one function (`handle_mcp_request()`)
+* Easier to add new MCP methods (just extend if/elif chain)
+
+❌ *Negative:*
+
+* Cannot use HTTP verbs semantically (GET for list, POST for call)
+* All requests are POST (less RESTful)
+
+|**Alternatives Considered**
+a|
+**Multi-route design (v0.1-0.2):**
+```python
+@app.post('/initialize')
+@app.post('/tools/list')
+@app.post('/tools/call')
+```
+
+*Why rejected:*
+
+- 3× the CORS config
+- Client needs to track endpoint per method
+- Not how JSON-RPC is meant to work
+|===
+
+=== Decision 3: Synchronous Tool Execution
+
+[cols="1,3",options="header"]
+|===
+|Aspect |Details
+
+|**Context**
+|Tools like `display_text()` or `set_rgb_led()` complete in <10ms. Could use async/await for concurrency.
+
+|**Decision**
+|Synchronous blocking execution: receive request → execute tool → return response.
+
+|**Rationale**
+a|
+* **Hardware access is fast:** No tool takes >100ms
+* **Single-threaded safety:** Avoids race conditions (e.g., two clients changing LEDs simultaneously)
+* **Memory efficiency:** No async overhead (saves ~20KB RAM)
+* **Predictability:** Request order = execution order
+
+|**Consequences**
+a|
+✅ *Positive:*
+
+* Simple mental model: one request at a time
+* No need for locks, semaphores, or queue management
+* Easy debugging (no interleaved logs)
+
+❌ *Negative:*
+
+* Cannot serve multiple clients simultaneously
+* Long-running tool (e.g., camera capture) blocks server
+* No parallelism (but K10 hardware is serial anyway - I2C bus)
+
+|**Alternatives Considered**
+a|
+**Async tool execution with asyncio:**
+```python
+async def execute_tool(name, args):
+    await hardware.set_led(...)
+```
+
+*Why rejected:*
+
+- MicroPython asyncio less mature than CPython
+- Hardware drivers (`unihiker_k10`) are synchronous
+- Adds complexity without measurable benefit (tools are fast)
+|===
+
+=== Decision 4: In-Memory Session Storage
+
+[cols="1,3",options="header"]
+|===
+|Aspect |Details
+
+|**Context**
+|MCP uses sessions to maintain state between client and server. Need to store session IDs.
+
+|**Decision**
+|Simple Python dictionary: `sessions = {}` in RAM.
+
+|**Rationale**
+a|
+* **Stateless server:** Sessions only track client ID, no state stored
+* **No persistence needed:** Server restart = new sessions (acceptable for dev tool)
+* **Fast access:** O(1) lookup
+* **MicroPython limitation:** No Redis, SQLite too heavy
+
+|**Consequences**
+a|
+✅ *Positive:*
+
+* Zero external dependencies
+* Instant session creation (just `sessions[id] = {...}`)
+* Automatic cleanup on reboot
+
+❌ *Negative:*
+
+* Sessions lost on crash/reboot
+* No session expiration (memory leak if client creates many sessions)
+* Cannot share sessions across multiple K10 boards
+
+|**Alternatives Considered**
+a|
+1. **File-based persistence (JSON):**
+   - *Problem:* SD card write cycles, slower, more code
+   - *Why rejected:* Overkill for ephemeral sessions
+
+2. **No sessions (stateless):**
+   - *Problem:* MCP spec requires session tracking for multi-request workflows
+   - *Why rejected:* Violates spec, Claude might not work
+
+|===
+
+=== Decision 5: Tool Schema in Code vs External File
+
+[cols="1,3",options="header"]
+|===
+|Aspect |Details
+
+|**Context**
+|14 tools need JSON Schema definitions for MCP discovery. Could store in JSON file or Python dict.
+
+|**Decision**
+|Define `TOOLS = [...]` as Python list of dicts in `k10-mcp-server.py`.
+
+|**Rationale**
+a|
+* **Colocation:** Tool definition + implementation in same file
+* **No file I/O:** Faster startup (no SD card read)
+* **Type safety:** Python dicts validated at runtime
+* **Easier editing:** Developers see schema alongside code
+
+|**Consequences**
+a|
+✅ *Positive:*
+
+* Single source of truth (code + schema together)
+* Instant tool registration (no parsing delay)
+* Easier refactoring (change schema = change implementation in one place)
+
+❌ *Negative:*
+
+* Large hardcoded list (100+ lines of schema)
+* Cannot hot-reload tools without server restart
+* Harder for non-programmers to add tools (need Python knowledge)
+
+|**Alternatives Considered**
+a|
+**External JSON file (`tools.json`):**
+```json
+[
+  {"name": "set_rgb_led", "inputSchema": {...}},
+  ...
+]
+```
+
+*Why rejected:*
+
+- Requires `json.load()` on startup (slower)
+- Schema/code can drift (no enforcement)
+- MicroPython filesystem sometimes unreliable (SD card issues)
+
+**Future consideration:** Plugin system in v1.0+ could use external configs
+|===
+
+== Pugh Matrix: Decision Analysis
+
+Below is the evaluation matrix for **Decision 1 (Transport Choice)**, the most critical architectural decision:
+
+=== Transport Selection Matrix
+
+[cols="2,1,1,1,1",options="header"]
+|===
+|Criterion (Weight) |Baseline: stdio |Alt 1: SSE |Alt 2: HTTP |Alt 3: WebSocket
+
+|**Embedded Compatibility (10)** |N/A (-10) |+0 |+2 |+1
+|**Implementation Simplicity (8)** |0 |-1 |+2 |0
+|**MCP Compliance (10)** |+2 |+2 |+2 |+1
+|**Debugging/Tooling (6)** |0 |+1 |+2 |+1
+|**Latency (4)** |+2 |-1 |0 |+2
+|**Memory Usage (7)** |+1 |0 |+1 |-1
+|**Future Extensibility (5)** |0 |0 |+1 |+2
+|**Weighted Score** |-100 |+3 |**+56** |+31
+|===
+
+**Scale:** -2 (much worse) to +2 (much better) vs baseline
+
+**Winner: HTTP (+56)** - Best balance of simplicity, compatibility, and tooling
+
+== Cross-Cutting Concepts Applied
+
+These decisions reflect deeper architectural principles:
+
+[cols="1,2",options="header"]
+|===
+|Principle |How It Shaped Decisions
+
+|**KISS (Keep It Simple, Stupid)**
+|Single endpoint, synchronous execution, in-memory storage
+
+|**Resource Constraints**
+|Avoided async overhead, no database, minimal dependencies
+
+|**Developer Experience**
+|HTTP = curl-testable, schemas in code = easy navigation
+
+|**Standards Compliance**
+|JSON-RPC 2.0 method dispatch, MCP tool schema format
+
+|**Fail-Fast**
+|Synchronous = errors immediate, no background task debugging
+|===
+
+== Evolution: What Changed Since v0.1
+
+[cols="1,2,2",options="header"]
+|===
+|Version |Old Approach |New Approach (Current)
+
+|v0.1
+|SSE transport, multi-endpoint
+|HTTP transport, single endpoint
+
+|v0.2
+|Complex async session handling
+|Simple sync request/response
+
+|v0.3
+|External tool config attempts
+|Tools hardcoded in Python (pragmatic choice)
+|===
+
+**Lesson Learned:** On embedded, *simpler is faster* - not in runtime, but in development velocity and reliability.
+
+== Related ADRs
+
+See `arc42/09-decisions/` for detailed Architecture Decision Records:
+
+- link:09-decisions/ADR-001-http-transport.adoc[ADR-001: HTTP Transport]
+- link:09-decisions/ADR-002-single-endpoint.adoc[ADR-002: Single Endpoint Design]
+- link:09-decisions/ADR-003-synchronous-execution.adoc[ADR-003: Synchronous Tool Execution]
+- link:09-decisions/ADR-004-session-management.adoc[ADR-004: In-Memory Session Storage]
+- link:09-decisions/ADR-005-tool-schema-location.adoc[ADR-005: Tool Schema in Code]

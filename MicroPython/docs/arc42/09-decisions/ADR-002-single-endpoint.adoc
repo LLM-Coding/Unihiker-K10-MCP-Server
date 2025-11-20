@@ -1,0 +1,51 @@
+= ADR-002: Single Endpoint Design
+
+**Status:** Accepted
+
+**Date:** 2024-11-12
+
+== Problem Statement
+
+Should we implement MCP methods as separate HTTP endpoints or use a single endpoint with JSON-RPC method dispatch?
+
+== Context
+
+* JSON-RPC 2.0 already has `method` field for dispatch
+* Early versions (v0.1) used multi-route design
+* Claude Desktop sends JSON-RPC regardless of URL structure
+
+== Decision
+
+**Use single `/mcp` endpoint for all MCP JSON-RPC messages.**
+
+All methods (`initialize`, `tools/list`, `tools/call`) handled by one route.
+
+== Consequences
+
+✅ **Positive:**
+* Simpler CORS configuration (one endpoint)
+* Easier client config in Claude Desktop
+* Follows JSON-RPC 2.0 best practices
+
+❌ **Negative:**
+* All requests are POST (less RESTful)
+* Cannot use HTTP verbs semantically
+
+== Pugh Matrix
+
+[cols="2,1,1",options="header"]
+|===
+|Criterion (Weight) |Multi-route (Baseline) |Single endpoint
+
+|CORS Complexity (7) |0 |+2
+|Client Configuration (8) |0 |+2
+|REST Semantics (4) |+1 |-1
+|Code Maintainability (9) |0 |+2
+|**Weighted Score** |**+4** |**+36**
+|===
+
+**Winner:** Single endpoint
+
+== Related Decisions
+
+* link:ADR-001-http-transport.adoc[ADR-001: HTTP Transport]

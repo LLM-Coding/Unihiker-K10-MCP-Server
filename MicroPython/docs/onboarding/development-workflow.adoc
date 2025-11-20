@@ -1,0 +1,554 @@
+= Development Workflow
+:toc:
+
+== Feature Lifecycle
+
+=== 1. Design Phase
+
+**Input:** Feature request, user story, or bug report
+
+**Activities:**
+
+1. **Understand requirements**
+   - What problem does it solve?
+   - Who benefits?
+   - Is it in scope for this project?
+
+2. **Check feasibility**
+   - Memory impact (run `gc.mem_free()` before/after)
+   - Hardware limitations (e.g., WiFi vs ML conflict)
+   - HAL support (does `unihiker_k10` provide needed API?)
+
+3. **Design approach**
+   - New tool? New endpoint? Internal refactor?
+   - Architectural decision? → Write ADR
+   - Breaking change? → Version bump strategy
+
+**Output:** Design doc (can be informal notes) or ADR
+
+**Time:** 1-4 hours depending on complexity
+
+---
+
+=== 2. Implementation Phase
+
+**Activities:**
+
+1. **Write code**
+   - Add schema to `TOOLS` (if new tool)
+   - Implement in `execute_tool()`
+   - Add error handling (try/except)
+
+2. **Test locally**
+   ```bash
+   # Upload to K10
+   # In Thonny, "File → Save As → MicroPython device → main.py"
+   
+   # Test with curl
+   curl -X POST http://192.168.1.100:8080/mcp \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"your_tool","arguments":{}}}'
+   
+   # Watch REPL for errors
+   ```
+
+3. **Memory check**
+   ```python
+   import gc
+   print(f"Before: {gc.mem_free()}")
+   # ... run tool ...
+   print(f"After: {gc.mem_free()}")
+   # Should not leak >5KB
+   ```
+
+**Output:** Working code on device
+
+**Time:** 2-8 hours
+
+---
+
+=== 3. Review Phase
+
+**Self-review checklist** (before submitting PR):
+
+- [ ] **Functionality**
+  - [ ] Tool works with curl
+  - [ ] Tool works with Claude Desktop
+  - [ ] Error cases handled (missing args, hardware failure)
+
+- [ ] **Code Quality**
+  - [ ] Schema matches implementation
+  - [ ] Try/except around HAL calls
+  - [ ] No hardcoded values (use constants)
+  - [ ] Print statements for debugging (or remove for production)
+
+- [ ] **Documentation**
+  - [ ] Tool description clear
+  - [ ] `inputSchema` complete and accurate
+  - [ ] Comments for non-obvious logic
+  - [ ] Update README if new capability
+
+- [ ] **Performance**
+  - [ ] Memory usage acceptable (<10KB per tool call)
+  - [ ] No blocking operations >100ms (unless unavoidable)
+  - [ ] Session dict doesn't grow unbounded
+
+- [ ] **Testing**
+  - [ ] Tested on actual K10 hardware
+  - [ ] Tested with `test_k10_mcp.py` script
+  - [ ] Tested with Claude Desktop
+  - [ ] Edge cases tested (invalid args, disconnected hardware)
+
+**Peer review:**
+
+If working in team, another developer reviews:
+
+1. **Architecture:** Does it fit design principles?
+2. **Correctness:** Does it work as intended?
+3. **Maintainability:** Can others understand and modify?
+4. **Security:** Any new attack vectors?
+
+**Output:** Approved code, ready for deployment
+
+**Time:** 1-2 hours
+
+---
+
+=== 4. Deployment Phase
+
+**Activities:**
+
+1. **Version bump**
+   - Update version in `k10-mcp-server.py` (line 5)
+   - Semantic versioning: MAJOR.MINOR.PATCH
+
+2. **Upload to device**
+   ```python
+   # Via Thonny: File → Save As → MicroPython device → main.py
+   ```
+
+3. **Restart server**
+   ```python
+   # Press K10 reset button OR
+   # In REPL: Ctrl+D (soft reboot)
+   ```
+
+4. **Verify deployment**
+   ```bash
+   # Health check
+   curl http://192.168.1.100:8080/
+   # Should show new version
+   
+   # Tool list
+   curl -X POST http://192.168.1.100:8080/mcp \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+   # Should include new tool
+   ```
+
+5. **Update Claude Desktop config** (if needed)
+   ```json
+   {
+     "mcpServers": {
+       "k10": {
+         "url": "http://192.168.1.100:8080/mcp"
+       }
+     }
+   }
+   ```
+   Restart Claude Desktop.
+
+**Output:** Feature live in production
+
+**Time:** 30 minutes
+
+---
+
+== When to Write ADRs
+
+**Always write ADR for:**
+
+- Changes to transport mechanism (HTTP, WebSocket, etc.)
+- New architectural patterns (e.g., plugin system)
+- Major refactoring (e.g., split into modules)
+- Dependency additions (new libraries)
+- Breaking changes to MCP protocol
+
+**Example decision points:**
+
+| Decision | ADR Needed? |
+|----------|-------------|
+| Add new tool `get_button` | ❌ No (follows existing pattern) |
+| Change from HTTP to WebSocket | ✅ Yes (transport change) |
+| Add authentication | ✅ Yes (new security model) |
+| Fix bug in sensor reading | ❌ No (implementation detail) |
+| Switch from sync to async tools | ✅ Yes (execution model change) |
+
+**ADR Template location:** link:../arc42/09-decisions/README.adoc[09-decisions/README.adoc]
+
+---
+
+== Git Workflow
+
+=== Branching Strategy
+
+```
+main (production)
+  ├─ feature/new-tool-name
+  ├─ fix/sensor-timeout
+  └─ docs/update-adr
+```
+
+**Branch naming:**
+
+- `feature/description` - New functionality
+- `fix/description` - Bug fixes
+- `docs/description` - Documentation only
+- `refactor/description` - Code cleanup, no behavior change
+
+---
+
+=== Commit Messages
+
+**Format:**
+```
+<type>: <short description>
+
+<optional longer description>
+
+<optional footer: closes #123>
+```
+
+**Types:**
+
+- `feat:` New feature (new tool, new endpoint)
+- `fix:` Bug fix
+- `docs:` Documentation update
+- `refactor:` Code restructure, no behavior change
+- `test:` Add or update tests
+- `chore:` Maintenance (dependencies, config)
+
+**Examples:**
+
+```
+feat: add get_button_state tool
+
+Implements button A/B state reading via HAL.
+Closes #42
+
+---
+
+fix: handle I2C timeout in temperature sensor
+
+Wraps temp_humi.read_temp() in retry logic.
+Prevents server crash on sensor disconnect.
+
+---
+
+docs: update ADR-001 with SSE deprecation rationale
+```
+
+---
+
+=== Pull Request Template
+
+```markdown
+## Description
+[What does this PR do?]
+
+## Type of Change
+- [ ] New tool
+- [ ] Bug fix
+- [ ] Documentation
+- [ ] Refactoring
+- [ ] Breaking change
+
+## Testing
+- [ ] Tested with curl
+- [ ] Tested with Claude Desktop
+- [ ] Tested error cases
+- [ ] Memory usage checked
+
+## Checklist
+- [ ] Code follows project conventions
+- [ ] Documentation updated
+- [ ] ADR written (if architectural change)
+- [ ] No memory leaks
+- [ ] Version bumped (if release)
+
+## Screenshots/Logs
+[Optional: REPL output, Claude Desktop interaction]
+```
+
+---
+
+== Testing Strategy
+
+=== Manual Testing Checklist
+
+**For every new tool:**
+
+1. **Curl test:**
+   ```bash
+   curl -X POST http://192.168.1.100:8080/mcp \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"YOUR_TOOL","arguments":{}}}' | jq
+   ```
+
+2. **Claude Desktop test:**
+   - Ask Claude to use the tool
+   - Verify correct behavior
+   - Check error messages if tool fails
+
+3. **Error tests:**
+   - Missing required argument
+   - Invalid argument type
+   - Hardware disconnected
+   - Server overload (rapid requests)
+
+4. **Memory test:**
+   ```python
+   # In REPL
+   import gc
+   gc.collect()
+   before = gc.mem_free()
+   # ... trigger tool via curl ...
+   gc.collect()
+   after = gc.mem_free()
+   print(f"Leaked: {before - after} bytes")
+   # Should be <5KB
+   ```
+
+---
+
+=== Automated Testing (Future)
+
+**Not yet implemented** (see Technical Debt in link:../arc42/11-risks.adoc[11-risks.adoc])
+
+**Planned for v1.0:**
+
+- Mock HAL for CPython tests
+- pytest suite for protocol layer
+- CI/CD with automated deployment
+
+---
+
+== Debugging Workflow
+
+=== Symptom: Tool doesn't work in Claude
+
+**Steps:**
+
+1. **Isolate:** Does it work with curl?
+   ```bash
+   curl -X POST http://192.168.1.100:8080/mcp -d '...'
+   ```
+   - If yes → Claude Desktop config issue
+   - If no → Server issue
+
+2. **Check REPL:** Watch for print statements and errors
+
+3. **Verify JSON-RPC format:** Use `jq` to format response
+   ```bash
+   curl ... | jq
+   ```
+
+4. **Check Claude Desktop logs:**
+   ```bash
+   # macOS
+   tail -f ~/Library/Logs/Claude/mcp*.log
+   ```
+
+5. **Common fixes:**
+   - Restart Claude Desktop
+   - Check `claude_desktop_config.json` for correct IP
+   - Verify K10 on same network
+
+---
+
+=== Symptom: Server crashes (K10 display blank)
+
+**Steps:**
+
+1. **Check power:** USB cable connected?
+
+2. **Connect to REPL:** Thonny → see error traceback
+
+3. **Common causes:**
+   - `MemoryError` → Reduce memory usage, add `gc.collect()`
+   - `OSError: [Errno 110] ETIMEDOUT` → I2C timeout, add retry logic
+   - `ImportError` → Missing library, install via `mip`
+
+4. **Restart server:** Press reset button on K10
+
+5. **Add error handling:** Wrap failing code in try/except
+
+---
+
+=== Symptom: Sensor returns wrong value
+
+**Steps:**
+
+1. **Test HAL directly in REPL:**
+   ```python
+   from unihiker_k10 import temp_humi
+   print(temp_humi.read_temp())
+   # Should match room temperature
+   ```
+
+2. **Check wiring:** Sensor connected properly?
+
+3. **Read datasheet:** Is HAL function doing what you think?
+
+4. **Add calibration:** Some sensors need offset correction
+
+5. **Document quirk:** Add comment in code
+
+---
+
+== Code Review Guidelines
+
+=== Reviewer's Checklist
+
+**Functionality:**
+
+- [ ] Does it solve stated problem?
+- [ ] Edge cases handled?
+- [ ] Error messages helpful?
+
+**Code Quality:**
+
+- [ ] Readable? (clear variable names, comments for complex logic)
+- [ ] No code duplication?
+- [ ] Follows project conventions? (e.g., try/except around HAL)
+
+**Performance:**
+
+- [ ] Memory impact acceptable? (<10KB per tool)
+- [ ] No unnecessary allocations?
+- [ ] Blocking operations documented?
+
+**Security:**
+
+- [ ] Input validation? (schema constraints enforced)
+- [ ] No injection vulnerabilities? (SQL, command, etc. - unlikely here)
+- [ ] Sensitive data not logged?
+
+**Documentation:**
+
+- [ ] Tool description clear?
+- [ ] Schema complete?
+- [ ] Comments for non-obvious code?
+
+**Testing:**
+
+- [ ] Tested on hardware?
+- [ ] Tested error paths?
+
+---
+
+=== Providing Feedback
+
+**Good feedback:**
+
+> "In line 42, `rgb.write()` can raise `OSError` on I2C timeout. Suggest wrapping in try/except and returning `isError: true`. See ADR-003 for pattern."
+
+**Bad feedback:**
+
+> "This will crash."
+
+**Principles:**
+
+1. **Be specific:** Point to line numbers, explain issue
+2. **Be constructive:** Suggest fix or reference docs
+3. **Be respectful:** Assume good intent
+4. **Explain why:** Link to ADR, concept doc, or past issue
+
+---
+
+== Release Process
+
+=== Version Numbering
+
+**Format:** MAJOR.MINOR.PATCH
+
+- **MAJOR:** Breaking changes (e.g., MCP protocol version change)
+- **MINOR:** New features (new tools, new endpoints)
+- **PATCH:** Bug fixes, small improvements
+
+**Examples:**
+
+- `0.3.0 → 0.3.1` (fix sensor timeout bug)
+- `0.3.1 → 0.4.0` (add camera tools)
+- `0.4.0 → 1.0.0` (add authentication, production-ready)
+
+---
+
+=== Release Checklist
+
+- [ ] All features tested
+- [ ] Memory usage profiled
+- [ ] Documentation updated
+- [ ] CHANGELOG.md updated
+- [ ] Version bumped in code (line 5)
+- [ ] Git tag created: `git tag v0.4.0`
+- [ ] Release notes written (GitHub releases)
+
+---
+
+=== Hotfix Process
+
+**For critical bugs in production:**
+
+1. Branch from `main`: `git checkout -b hotfix/critical-bug`
+2. Fix bug
+3. Test thoroughly
+4. Bump PATCH version
+5. Fast-track review
+6. Merge to `main`
+7. Tag release
+8. Deploy immediately
+
+---
+
+== Communication
+
+**Slack/Discord channels (if team):**
+
+- `#k10-dev` - Development discussion
+- `#k10-support` - User issues
+- `#k10-releases` - Announcements
+
+**GitHub Issues:**
+
+- Bug reports
+- Feature requests
+- Questions
+
+**ADRs:**
+
+- Major decisions
+- Architectural changes
+
+**README updates:**
+
+- User-facing changes
+- Setup instructions
+
+**Code comments:**
+
+- Non-obvious implementation details
+- Known bugs/workarounds
+- TODO items
+
+---
+
+## Best Practices Summary
+
+1. **Test with curl before Claude** (isolate issues)
+2. **Always wrap HAL in try/except** (hardware fails)
+3. **Check memory after each change** (RAM limited)
+4. **Display status on screen** (no console)
+5. **Write ADR for architectural changes** (document reasoning)
+6. **Review own code before PR** (use checklist)
+7. **Document quirks inline** (help future you)
+8. **Keep it simple** (embedded = constrained)

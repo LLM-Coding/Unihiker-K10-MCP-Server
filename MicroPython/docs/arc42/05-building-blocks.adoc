@@ -1,0 +1,592 @@
+= Building Blocks View
+:toc:
+:kroki-server-url: https://kroki.io
+:kroki-fetch-diagram: true
+
+== Component Landscape
+
+The K10 MCP Server consists of 4 major subsystems arranged in a layered architecture:  
+
+[plantuml, component-overview, svg]
+----
+@startuml
+!include <C4/C4_Component>
+
+Container_Boundary(server, "K10 MCP Server") {
+    Component(http, "HTTP Server", "Microdot", "Routes requests, manages connections")
+    Component(protocol, "Protocol Handler", "Python", "Parses JSON-RPC, dispatches methods")
+    Component(tools, "Tool Executors", "Python", "Implements MCP tools (14 tools)")
+    Component(hal, "Hardware Layer", "unihiker_k10", "Device drivers (I2C, GPIO, SPI)")
+}
+
+Component_Ext(client, "MCP Client", "Claude Desktop")
+Component_Ext(hardware, "K10 Hardware", "ESP32-S3 + peripherals")
+
+Rel(client, http, "POST /mcp", "JSON-RPC")
+Rel(http, protocol, "parse_request()")
+Rel(protocol, tools, "execute_tool()")
+Rel(tools, hal, "rgb.write(), screen.draw_text()")
+Rel(hal, hardware, "I2C/GPIO commands")
+
+@enduml
+----
+
+== Level 1: System Decomposition
+
+[cols="1,2,2,2",options="header"]
+|===
+|Component |Role |Responsibility |Key Constraint
+
+|**HTTP Server** +
+(`app = Microdot()`)
+|Entry point
+|Accept TCP connections, route to `/mcp` endpoint, handle CORS
+|MicroPython HTTP only (no HTTPS)
+
+|**Protocol Handler** +
+(`handle_mcp_request()`)
+|MCP brain
+|Parse JSON-RPC, validate structure, dispatch to correct handler
+|Must follow MCP 2024-11-05 spec exactly
+
+|**Tool Executors** +
+(`execute_tool()`)
+|Business logic
+|Translate MCP tool calls to hardware API calls, validate arguments
+|Error handling for hardware failures
+
+|**Hardware Layer** +
+(`unihiker_k10` module)
+|Abstraction
+|Provide Python API for sensors, LEDs, display, etc.
+|Vendor-supplied, black-box (no source)
+|===
+
+== Level 2: Component Details
+
+=== Component: HTTP Server
+
+**Technology:** Microdot (lightweight WSGI-like framework for MicroPython)
+
+**Interfaces Provided:**
+
+* `POST /mcp` - Main MCP endpoint
+* `OPTIONS /mcp` - CORS preflight
+* `GET /` - Health check
+
+**Dependencies:**
+
+* MicroPython `usocket` module
+* Async I/O support
+
+**Internal Structure:**
+
+[source,python]
+----
+app = Microdot()
+
+@app.route('/mcp', methods=['POST'])
+async def mcp_endpoint(request):
+    # Parse JSON-RPC from request.body
+    # Call protocol handler
+    # Return JSON response
+
+@app.route('/', methods=['GET'])
+async def index(request):
+    # Health check status
+----
+
+**Design Rationale:**
+
+* **Why Microdot?** 
+  - Only ~10KB (vs Flask/FastAPI which don't run on MicroPython)
+  - Decorator syntax familiar to Python devs
+  - Active maintenance
+
+* **Why async routes?**
+  - Future-proofing for WebSocket support
+  - Allows concurrent connection handling (even if tools are sync)
+
+**Failure Modes:**
+
+[cols="1,2,2",options="header"]
+|===
+|Failure |Cause |Handling
+
+|**Port 8080 in use**
+|Another process bound to port
+|Server startup fails, display shows error
+
+|**Malformed HTTP**
+|Client sends non-HTTP traffic
+|Microdot logs error, closes connection
+
+|**Request too large**
+|>4KB JSON payload
+|OOM exception, server restarts (WDT)
+|===
+
+---
+
+=== Component: Protocol Handler
+
+**Technology:** Pure Python, no external dependencies
+
+**Interfaces Provided:**
+
+* `handle_mcp_request(request_data, session_id) -> dict`
+
+**Supported MCP Methods:**
+
+[cols="1,2,1",options="header"]
+|===
+|Method |Handler Logic |Returns
+
+|`initialize`
+|Create session, return capabilities
+|`{"protocolVersion": "2024-11-05", "capabilities": {...}}`
+
+|`tools/list`
+|Return `TOOLS` array
+|`{"tools": [...]}`
+
+|`tools/call`
+|Dispatch to `execute_tool()`
+|`{"content": [{"type": "text", "text": "..."}]}`
+
+|*unknown*
+|Return error
+|`{"error": {"code": -32601, "message": "Method not found"}}`
+|===
+
+**Internal Data Flow:**
+
+[plantuml, protocol-flow, svg]
+----
+@startuml
+start
+:Receive request_data;
+:Extract method;
+
+if (method == "initialize") then (yes)
+  :Generate session_id;
+  :Return capabilities;
+elseif (method == "tools/list") then (yes)
+  :Return TOOLS array;
+elseif (method == "tools/call") then (yes)
+  :Extract tool name + args;
+  :Call execute_tool();
+  :Wrap result in MCP format;
+else (unknown)
+  :Return JSON-RPC error -32601;
+endif
+
+:Build JSON-RPC response;
+stop
+@enduml
+----
+
+**Design Rationale:**
+
+* **Why not a class?** 
+  - Stateless function is simpler (session state in global `sessions` dict)
+  - No need for OOP overhead on embedded
+
+* **Why if/elif chain vs dispatch table?**
+  - Only 3 methods (for now)
+  - Explicit is clearer for newcomers
+  - Future: Refactor to dict dispatch if >10 methods
+
+**Error Handling Strategy:**
+
+* **Invalid JSON:** Return HTTP 400 before reaching handler
+* **Unknown method:** JSON-RPC error code -32601
+* **Tool execution error:** Wrapped in `{"isError": true, "content": [...]}`
+
+---
+
+=== Component: Tool Executors
+
+**Technology:** Pure Python wrappers around HAL
+
+**Structure:**
+
+[source,python]
+----
+def execute_tool(name, arguments):
+    try:
+        if name == "set_rgb_led":
+            # Validate arguments
+            r, g, b = arguments["r"], arguments["g"], arguments["b"]
+            # Call HAL
+            rgb.write(num=arguments.get("led_num", -1), R=r, G=g, B=b)
+            # Return MCP result
+            return {"content": [{"type": "text", "text": "LED set"}]}
+        
+        elif name == "get_temperature":
+            temp = temp_humi.read_temp()
+            return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+        
+        # ... 12 more tools
+    except Exception as e:
+        return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+----
+
+**14 Implemented Tools:**
+
+[cols="1,2,1",options="header"]
+|===
+|Tool Category |Tools |Hardware Used
+
+|**RGB Control**
+|`set_rgb_led`, `clear_rgb_leds`, `set_rgb_brightness`
+|3× WS2812B LEDs (I2C)
+
+|**Environmental Sensors**
+|`get_temperature`, `get_temperature_f`, `get_humidity`, `get_light_level`
+|AHT20 (I2C), LTR-303ALS (I2C)
+
+|**Motion Sensor**
+|`get_acceleration`
+|LIS2DW12 Accelerometer (I2C)
+
+|**Display Control**
+|`display_text`, `clear_display`, `set_display_background`, `draw_line`, `draw_rectangle`, `draw_circle`
+|2.8" TFT (SPI, ST7789 driver)
+|===
+
+**Argument Validation:**
+
+Each tool validates input against its `inputSchema`:
+
+* **Type checking:** Ensure `int` is int, `string` is string
+* **Range checking:** E.g., `brightness: 0-9`, `r/g/b: 0-255`
+* **Required fields:** Raise error if missing
+
+**Design Rationale:**
+
+* **Why single giant function?**
+  - All tools need same error handling wrapper
+  - Easy to see all tools in one place
+  - Performance: No function call overhead per tool
+
+* **Why text-only responses?**
+  - MCP supports images/binary, but adds complexity
+  - Sensor data is small (numbers/strings)
+  - Future: Add camera tool with base64 images
+
+**Failure Recovery:**
+
+[cols="1,2,2",options="header"]
+|===
+|Failure |Example |Recovery
+
+|**Hardware timeout**
+|Sensor not responding on I2C
+|Return error message, don't crash server
+
+|**Invalid color value**
+|`r=300` (out of range)
+|Python exception → caught, return `isError: true`
+
+|**Display crash**
+|SPI bus collision
+|Reinitialize screen in next call (stateless tools)
+|===
+
+---
+
+=== Component: Hardware Layer (HAL)
+
+**Technology:** `unihiker_k10` module (vendor-provided, binary)
+
+**Key Modules:**
+
+[cols="1,2,2",options="header"]
+|===
+|Module |API Examples |Hardware Controlled
+
+|`screen`
+|`init()`, `clear()`, `draw_text()`, `show_draw()`
+|ST7789 TFT display
+
+|`rgb`
+|`write(num, R, G, B)`, `clear()`, `brightness(level)`
+|WS2812B LED strip (3 LEDs)
+
+|`temp_humi`
+|`read_temp()`, `read_humi()`
+|AHT20 sensor (I2C addr 0x38)
+
+|`light`
+|`read()`
+|LTR-303ALS (I2C addr 0x29)
+
+|`acce`
+|`read_x()`, `read_y()`, `read_z()`
+|LIS2DW12 (I2C addr 0x19)
+
+|`wifi`
+|`connect(ssid, psd)`, `status()`, `info()`
+|ESP32-S3 WiFi radio
+
+|`button`
+|`read('a')`, `read('b')`
+|GPIO pins (pull-up resistors)
+
+|`camera` (unused)
+|`capture()`, `init()`
+|OV2640 camera (conflicts with WiFi!)
+
+|`speaker`, `mic` (unused)
+|`play_sound()`, `start()`
+|I2S audio (future feature)
+|===
+
+**Dependency Graph:**
+
+[plantuml, hal-dependencies, svg]
+----
+@startuml
+package "unihiker_k10" {
+  [screen] --> I2C_Bus
+  [rgb] --> I2C_Bus
+  [temp_humi] --> I2C_Bus
+  [light] --> I2C_Bus
+  [acce] --> I2C_Bus
+  [wifi] --> ESP32_Radio
+  [button] --> GPIO_Pins
+}
+
+package "Hardware" {
+  [I2C_Bus]
+  [ESP32_Radio]
+  [GPIO_Pins]
+  [SPI_Bus]
+}
+
+[screen] --> SPI_Bus
+@enduml
+----
+
+**Known Limitations:**
+
+[WARNING]
+====
+**WiFi vs Camera Conflict:** Cannot use both simultaneously in MicroPython
+
+*Root Cause:* ESP32 memory constraints, driver conflicts
+
+*Workaround:* Separate Arduino sketch for AI/ML features (planned)
+====
+
+**Design Rationale:**
+
+* **Why vendor HAL vs custom drivers?**
+  - Tested and validated by manufacturer
+  - Saves months of driver development
+  - Risk: Closed source, no bug fixes if abandoned
+
+* **Future Mitigation:**
+  - Document all HAL calls for re-implementation
+  - Consider open-source alternative (e.g., MicroPython machine module)
+
+---
+
+== Dependency Relationships
+
+[plantuml, dependencies, svg]
+----
+@startuml
+!include <C4/C4_Component>
+
+Component(client, "MCP Client")
+Component(http, "HTTP Server")
+Component(protocol, "Protocol Handler")
+Component(tools, "Tool Executors")
+Component(hal, "HAL")
+Component(hardware, "K10 Hardware")
+
+Component(global_tools, "TOOLS (global list)")
+Component(global_sessions, "sessions (global dict)")
+
+client --> http : HTTP POST
+http --> protocol : call
+protocol --> global_tools : read
+protocol --> global_sessions : read/write
+protocol --> tools : call
+tools --> hal : call
+hal --> hardware : I2C/GPIO/SPI
+
+note right of global_tools
+  14 tool schemas
+  ~200 lines JSON
+end note
+
+note right of global_sessions
+  In-memory dict
+  {session_id: {...}}
+end note
+
+@enduml
+----
+
+**Key Observations:**
+
+1. **Unidirectional flow:** Client → Server → HAL → Hardware (no callbacks)
+2. **Shared state:** `TOOLS` and `sessions` are global (simple, but limits modularity)
+3. **No circular dependencies:** Clean layering
+
+== Code Organization
+
+```
+k10-mcp-server.py (443 lines)
+├─ Imports (lines 1-15)
+├─ App Init (line 17)
+├─ Hardware Init (line 20)
+├─ Constants (lines 23-25)
+│  ├─ MCP_VERSION
+│  └─ sessions = {}
+├─ TOOLS Definition (lines 28-165)
+│  └─ 14 tool schemas
+├─ execute_tool() (lines 168-280)
+│  └─ 14 if/elif branches
+├─ handle_mcp_request() (lines 283-335)
+│  └─ 4 method handlers
+├─ HTTP Routes (lines 338-420)
+│  ├─ POST /mcp
+│  ├─ OPTIONS /mcp
+│  └─ GET /
+└─ Main (lines 423-443)
+   └─ app.run()
+```
+
+**Design Smell?** One large file (443 lines)
+
+*Why acceptable here:*
+
+- MicroPython lacks package imports (limited `sys.path`)
+- Single file easier to upload to device
+- No hidden state across modules
+
+*Refactoring threshold:* If >800 lines, split into:
+- `mcp_protocol.py` (protocol handling)
+- `tools.py` (tool definitions + executors)
+- `main.py` (HTTP routes + startup)
+
+== Whitebox: MCP Request Flow
+
+**Example:** User asks Claude: *"What's the temperature?"*
+
+[plantuml, whitebox-flow, svg]
+----
+@startuml
+participant "Claude" as C
+participant "HTTP Server" as H
+participant "Protocol Handler" as P
+participant "Tool Executor" as T
+participant "HAL" as HAL
+participant "AHT20 Sensor" as HW
+
+C -> H: POST /mcp\n{"method": "tools/call", "params": {"name": "get_temperature"}}
+activate H
+
+H -> P: handle_mcp_request(request_data, session_id)
+activate P
+
+P -> P: Extract method = "tools/call"
+P -> P: Extract tool name = "get_temperature"
+P -> P: Extract arguments = {}
+
+P -> T: execute_tool("get_temperature", {})
+activate T
+
+T -> HAL: temp_humi.read_temp()
+activate HAL
+
+HAL -> HW: I2C read (addr 0x38, reg 0x00)
+HW --> HAL: 0x5F (raw value)
+
+HAL -> HAL: Convert to Celsius
+HAL --> T: 23.5
+
+deactivate HAL
+
+T -> T: Format MCP response
+T --> P: {"content": [{"type": "text", "text": "Temperature: 23.5°C"}]}
+
+deactivate T
+
+P -> P: Wrap in JSON-RPC
+P --> H: {"jsonrpc": "2.0", "id": 1, "result": {...}}
+
+deactivate P
+
+H --> C: HTTP 200\n{"jsonrpc": "2.0", ...}
+
+deactivate H
+
+C -> C: Parse response
+C -> C: Generate natural language
+C --> User: "The temperature is 23.5°C"
+@enduml
+----
+
+**Timing:**
+
+* **HTTP latency:** ~10ms (local network)
+* **JSON parsing:** ~5ms
+* **Tool execution:** ~8ms (I2C read)
+* **Response build:** ~5ms
+* **Total:** ~30ms per tool call
+
+== Key Interfaces Summary
+
+[cols="1,2,1,2",options="header"]
+|===
+|Interface |Provider |Consumer |Contract
+
+|`POST /mcp`
+|HTTP Server
+|Claude Desktop
+|JSON-RPC 2.0, MCP schema
+
+|`handle_mcp_request()`
+|Protocol Handler
+|HTTP Server
+|Takes dict, returns dict (JSON-serializable)
+
+|`execute_tool()`
+|Tool Executors
+|Protocol Handler
+|Takes (name, args), returns MCP result dict
+
+|`rgb.write()`
+|HAL
+|Tool Executors
+|Takes (num, R, G, B), returns None, raises on error
+
+|`temp_humi.read_temp()`
+|HAL
+|Tool Executors
+|Returns float (Celsius), blocks ~5ms
+|===
+
+== Boundary Crossings
+
+**Where are the performance bottlenecks?**
+
+1. **Network I/O** (HTTP server ↔ client): ~10-20ms
+   - *Mitigation:* Keep payloads small (<1KB)
+
+2. **I2C Sensor Reads** (HAL ↔ hardware): ~5-15ms per sensor
+   - *Mitigation:* Batch sensor reads if needed
+
+3. **Display Updates** (HAL ↔ TFT): ~20ms for full screen refresh
+   - *Mitigation:* Use `draw_text()` with coordinates, not `clear()` every time
+
+**Not bottlenecks:**
+
+* JSON parsing (MicroPython ujson is fast)
+* Protocol handling (pure Python, <1ms)
+* Tool dispatch (simple if/elif, <0.1ms)

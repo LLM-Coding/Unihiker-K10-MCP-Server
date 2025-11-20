@@ -1,0 +1,343 @@
+= Risks and Technical Debt
+:toc:
+
+== High-Priority Risks
+
+[cols="1,2,1,2",options="header"]
+|===
+|Risk |Impact |Probability |Mitigation
+
+|**No Authentication**
+|Unauthorized hardware control
+|HIGH
+|Network isolation, planned API key auth in v1.0
+
+|**Memory Leak**
+|Server crash after prolonged use
+|MEDIUM
+|Garbage collection monitoring, session cleanup
+
+|**WiFi vs ML Conflict**
+|Cannot use camera while server running
+|CERTAIN
+|Separate Arduino implementation planned
+
+|**Vendor HAL Abandonment**
+|No bug fixes or updates
+|MEDIUM
+|Document all HAL calls, keep isolated for replacement
+
+|**MCP Spec Changes**
+|Breaking changes in future MCP versions
+|LOW
+|Version pinning, gradual migration
+|===
+
+== Technical Debt
+
+=== Debt 1: Single-file Architecture
+
+**Issue:** All code in one 443-line file
+
+**Why it exists:** MicroPython packaging limitations, easier upload
+
+**When to fix:** When file exceeds 800 lines
+
+**Refactoring plan:**
+- Split into `mcp_protocol.py`, `tools.py`, `main.py`
+- Use MicroPython modules
+
+**Estimated effort:** 4 hours
+
+---
+
+=== Debt 2: No Unit Tests
+
+**Issue:** Manual testing only, no automated test suite
+
+**Why it exists:** MicroPython unittest support limited, hardware mocking complex
+
+**When to fix:** Before v1.0 release
+
+**Refactoring plan:**
+- Create mock HAL for CPython testing
+- Add pytest suite
+- CI/CD with automated tests
+
+**Estimated effort:** 2 days
+
+---
+
+=== Debt 3: Hardcoded Tool Schemas
+
+**Issue:** 14 tool definitions inline, hard to extend
+
+**Why it exists:** External config failed (SD card issues)
+
+**When to fix:** If >25 tools or plugin system needed
+
+**Refactoring plan:**
+- Tool registry pattern
+- Dynamic loading from JSON (with validation)
+
+**Estimated effort:** 8 hours
+
+== Post-Mortems
+
+=== Incident 1: SSE Connection Drops (2024-11-12)
+
+**What happened:**
+
+Server ran for 2 minutes, then Claude Desktop stopped responding. No error shown. Tools silently failed.
+
+**Root cause:**
+
+MicroPython SSE library didn't send keep-alive heartbeats. Client timed out but didn't detect failure.
+
+**Impact:**
+
+* 2 days debugging
+* User confusion (server appeared "connected")
+
+**Resolution:**
+
+Deprecated SSE, switched to HTTP (ADR-001)
+
+**Lessons learned:**
+
+* Don't use experimental libraries on embedded
+* HTTP request/response more reliable than long-lived connections
+* Always test timeout scenarios
+
+**Rule created:**
+
+> "Stick to mature protocols on embedded systems. Boring is reliable."
+
+---
+
+=== Incident 2: SD Card Corruption (2024-11-14)
+
+**What happened:**
+
+Stored tool configs in `tools.json` on SD card. After 50 reboots, file corrupted. Server wouldn't start.
+
+**Root cause:**
+
+SD card write cycles exceeded, no error handling for corrupted JSON
+
+**Impact:**
+
+* Manual re-flashing required
+* Lost custom tool configurations
+
+**Resolution:**
+
+Moved tool schemas to code (ADR-005)
+
+**Lessons learned:**
+
+* SD cards unreliable on embedded (limited write cycles)
+* Critical config should be in code, not filesystem
+* Always validate JSON before parsing
+
+**Rule created:**
+
+> "Never trust embedded filesystem for critical data. Use RAM or hardcode."
+
+---
+
+=== Incident 3: I2C Bus Collision (2024-11-16)
+
+**What happened:**
+
+Two rapid tool calls (`get_temperature` + `set_rgb_led`) caused I2C timeout. Server crashed.
+
+**Root cause:**
+
+HAL didn't implement I2C bus locking. Concurrent access caused collision.
+
+**Impact:**
+
+* Server restart required
+* Poor user experience (random failures)
+
+**Resolution:**
+
+Made tool execution synchronous (ADR-003)
+
+**Lessons learned:**
+
+* Shared hardware resources need serialization
+* Async doesn't always improve performance on embedded
+* Simpler (sync) often more reliable
+
+**Rule created:**
+
+> "Hardware access must be serialized. Use synchronous execution for simplicity."
+
+== Known Bugs
+
+[cols="1,2,1,1",options="header"]
+|===
+|Bug |Description |Severity |Status
+
+|**Display flicker**
+|`show_draw()` sometimes takes 50ms instead of 20ms
+|LOW
+|Investigating (HAL issue)
+
+|**Session dict grows**
+|No expiration, memory leak after 100+ connections
+|MEDIUM
+|Fix planned v0.4
+
+|**Brightness ignored**
+|`rgb.brightness(5)` doesn't affect brightness
+|LOW
+|HAL bug, workaround: adjust RGB values
+
+|**Long text truncated**
+|`display_text()` cuts off after 30 chars
+|LOW
+|TFT width limitation, not fixable
+|===
+
+== Security Issues
+
+[WARNING]
+====
+**CRITICAL:** No authentication or authorization!
+
+Anyone on network can:
+- Control hardware
+- Read sensors
+- Crash server (DoS)
+====
+
+**Planned fixes (v1.0):**
+
+1. API key in HTTP header
+2. IP whitelist
+3. Rate limiting
+4. TLS (if MicroPython adds support)
+
+== Performance Bottlenecks
+
+[cols="1,2,1,2",options="header"]
+|===
+|Bottleneck |Measurement |Impact |Mitigation
+
+|**I2C Sensor Reads**
+|~8ms per sensor
+|Tools slower than network latency
+|None (hardware limitation)
+
+|**Display Updates**
+|~20ms for `show_draw()`
+|Display-heavy tools lag
+|Minimize `clear()` calls
+
+|**JSON Parsing**
+|~5ms per request
+|Small but measurable
+|Use ujson (already done)
+
+|**Network Latency**
+|~10-15ms (WiFi)
+|Largest contributor
+|Cannot optimize (physics)
+|===
+
+**Total latency budget:** ~50ms per tool call (acceptable for human interaction)
+
+== Dependency Risks
+
+[cols="1,1,2",options="header"]
+|===
+|Dependency |Risk Level |Mitigation
+
+|**unihiker_k10 (HAL)**
+|HIGH
+|Document all calls, isolate in one function, plan open-source alternative
+
+|**Microdot**
+|LOW
+|Active maintenance, small codebase, could fork if needed
+
+|**MicroPython**
+|MEDIUM
+|Stable but embedded version lags CPython, pin version
+
+|**Claude Desktop**
+|LOW
+|Anthropic maintains, MCP is standard
+|===
+
+== Future Risks (Anticipated)
+
+=== Risk: MCP 2.0 Breaking Changes
+
+**Probability:** MEDIUM (MCP is young spec)
+
+**Impact:** HIGH (server won't work with new clients)
+
+**Mitigation:**
+
+* Support multiple MCP versions
+* Graceful degradation
+* Version negotiation in `initialize`
+
+---
+
+=== Risk: Hardware End-of-Life
+
+**Probability:** MEDIUM (K10 is niche product)
+
+**Impact:** HIGH (no replacement boards)
+
+**Mitigation:**
+
+* Port to other ESP32 boards
+* Abstract hardware layer further
+* Community support for DIY boards
+
+---
+
+=== Risk: Resource Exhaustion
+
+**Probability:** MEDIUM (as features added)
+
+**Impact:** HIGH (server unstable)
+
+**Mitigation:**
+
+* Memory profiling in each release
+* Feature flags to disable heavy features
+* Offload processing to client (e.g., sensor aggregation)
+
+== Why Certain Rules Exist
+
+[cols="1,2",options="header"]
+|===
+|Rule |Origin Story
+
+|**"Always test with curl before Claude"**
+|After 10 instances of "Claude broken" that were actually server bugs. Curl isolates issues.
+
+|**"Display status on startup"**
+|Users couldn't tell if server running (no console). Screen is the "STDOUT".
+
+|**"Wrap HAL in try/except"**
+|I2C timeouts crashed server 5 times. Now errors are graceful.
+
+|**"Use led_num=-1 for all LEDs"**
+|Vendor docs unclear. Found by trial and error, now convention.
+
+|**"Call show_draw() after display"**
+|Forgot once, spent 30 minutes debugging "broken display". Framebuffer needs flush.
+
+|**"Avoid external config files"**
+|SD card corruption incident (see post-mortem). Code is more reliable.
+|===
+
+Every rule has a scar. These aren't arbitrary - they're lessons learned the hard way.

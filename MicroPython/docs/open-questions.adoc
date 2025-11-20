@@ -1,0 +1,531 @@
+= Open Questions and Ambiguities
+:toc:
+
+== Purpose
+
+This document captures **missing information**, **ambiguities**, and **assumptions** made during mental model documentation creation.
+
+These questions should be answered by the team/maintainer for complete understanding.
+
+---
+
+== Architecture & Design
+
+=== Q1: WiFi vs ML Conflict Resolution
+
+**Question:** Why exactly do WiFi and ML features conflict in MicroPython on ESP32-S3?
+
+**Context:** Documentation states "WiFi and ML features do not work together" but no technical root cause explained.
+
+**Impact:** 
+- Blocks camera/AI tool implementation
+- Arduino port needed, but unclear why MicroPython can't be fixed
+- Affects roadmap (v1.0 features)
+
+**Found in:** `README.adoc`, `arc42/01-introduction.adoc`
+
+**Assumption made:** Memory conflict between WiFi and TensorFlow Lite drivers. Need vendor confirmation.
+
+**Needs clarification from:** UNIHIKER vendor or MicroPython ESP32 maintainer
+
+---
+
+=== Q2: MCP Protocol Version Upgrade Path
+
+**Question:** What happens when MCP spec upgrades to v2.0 or later?
+
+**Context:** Server hardcodes `MCP_VERSION = "2024-11-05"`. No version negotiation implemented.
+
+**Impact:**
+- Breaking changes in MCP might make server incompatible with new Claude Desktop
+- No graceful degradation strategy
+- Users stuck on old Claude version or forced update
+
+**Found in:** `k10-mcp-server.py` line 23
+
+**Assumption made:** MCP will maintain backward compatibility OR we'll need to support multiple versions
+
+**Mitigation needed:** Version negotiation in `initialize` response, feature flags
+
+---
+
+=== Q3: Session Cleanup Strategy
+
+**Question:** What is the intended session lifecycle? When should sessions expire?
+
+**Context:** Sessions stored in RAM, never cleaned up. Documentation acknowledges memory leak but no defined policy.
+
+**Impact:**
+- After 100 connections → ~5KB wasted
+- Unclear threshold for cleanup (1 hour? 1 day? Never?)
+- Production deployment affected
+
+**Found in:** `arc42/04-solution-strategy.adoc`, `arc42/11-risks.adoc`
+
+**Assumption made:** Sessions should expire after 1 hour of inactivity OR limit to 10 most recent
+
+**Needs decision:** Product owner / maintainer to define policy
+
+---
+
+=== Q4: Maximum Tool Count Before Performance Degrades
+
+**Question:** How many tools can TOOLS array hold before JSON parsing becomes bottleneck?
+
+**Context:** Currently 14 tools (~5KB JSON). At what size does `tools/list` response become problematic?
+
+**Impact:**
+- Roadmap includes camera tools, audio tools → could reach 30+ tools
+- Large JSON → slow parsing on embedded
+- Pagination not in MCP spec
+
+**Found in:** `k10-mcp-server.py` lines 28-165
+
+**Assumption made:** 50 tools is practical limit (~20KB JSON, ~100ms parsing)
+
+**Testing needed:** Load test with 50+ tool schemas
+
+---
+
+== Hardware & HAL
+
+=== Q5: HAL Source Code Availability
+
+**Question:** Is `unihiker_k10` module open source? Where is source repository?
+
+**Context:** Treated as black box throughout documentation. No source found in vendor repos.
+
+**Impact:**
+- Cannot debug HAL issues at source level
+- Vendor lock-in (cannot port to other boards easily)
+- No community contributions to HAL
+
+**Found in:** All tool implementations
+
+**Assumption made:** Proprietary/binary module, no source available
+
+**Needs clarification from:** UNIHIKER vendor (DFRobot?)
+
+---
+
+=== Q6: I2C Bus Addressing
+
+**Question:** What are actual I2C addresses for all sensors?
+
+**Context:** Documentation mentions sensors exist but not their bus addresses. Needed for low-level debugging.
+
+**Impact:**
+- Cannot use logic analyzer effectively
+- Hard to diagnose I2C conflicts
+- Difficult to write alternative drivers
+
+**Found in:** `arc42/05-building-blocks.adoc` (mentions I2C but no addresses)
+
+**Assumption made:**
+- AHT20 (temp/humidity): 0x38
+- LTR-303ALS (light): 0x29  
+- LIS2DW12 (accel): 0x19
+- WS2812B (LEDs): Not I2C, custom protocol
+
+**Verification needed:** Test with `i2cdetect` equivalent in MicroPython
+
+---
+
+=== Q7: Display Framebuffer Size
+
+**Question:** How much RAM does display framebuffer consume?
+
+**Context:** Documentation says "~20KB" but not measured precisely.
+
+**Impact:**
+- Affects total available RAM calculation
+- Determines feasibility of double-buffering
+- Important for memory management
+
+**Found in:** `arc42/05-building-blocks.adoc`
+
+**Assumption made:** 20KB based on screen resolution (320x240 @ 16-bit color ≈ 150KB, likely compressed)
+
+**Measurement needed:** `gc.mem_free()` before and after `screen.init()`
+
+---
+
+=== Q8: LED Brightness Range Interpretation
+
+**Question:** What do brightness levels 0-9 actually mean?
+
+**Context:** `rgb.brightness(5)` sets brightness, but is this linear? PWM duty cycle? Log scale?
+
+**Impact:**
+- User expectation mismatch ("5 should be half of 9")
+- Cannot document precisely
+- Affects tool behavior consistency
+
+**Found in:** `k10-mcp-server.py` line 187
+
+**Assumption made:** Linear scale (0 = off, 9 = max, 5 ≈ 55% brightness)
+
+**Testing needed:** Measure LED output with light sensor at each level
+
+---
+
+== Protocol & MCP
+
+=== Q9: Streaming Response Support
+
+**Question:** Does HTTP streamable transport require chunked transfer encoding?
+
+**Context:** MCP spec mentions "streamable" HTTP but current implementation returns single JSON response.
+
+**Impact:**
+- Missing streaming capability (e.g., camera feed)
+- Not fully compliant with "streamable" transport?
+- Unclear if Claude Desktop expects chunked responses
+
+**Found in:** `arc42/09-decisions/ADR-001-http-transport.adoc`
+
+**Assumption made:** Single JSON response sufficient for current tools, streaming deferred to future
+
+**Needs clarification from:** MCP spec authors or Claude Desktop team
+
+---
+
+=== Q10: CORS Headers Necessity
+
+**Question:** Are CORS headers needed if Claude Desktop is local client (not browser)?
+
+**Context:** Implementation adds `Access-Control-Allow-Origin: *` but unclear if required.
+
+**Impact:**
+- Unnecessary headers add bandwidth
+- Security: wildcard CORS is permissive
+- Might be artifact from web-based testing
+
+**Found in:** `k10-mcp-server.py` lines 350-353
+
+**Assumption made:** Needed for browser-based testing tools (Postman web, etc.), harmless to include
+
+**Testing needed:** Remove CORS headers, test if Claude Desktop still works
+
+---
+
+=== Q11: Session ID Generation Algorithm
+
+**Question:** What guarantees uniqueness of session IDs?
+
+**Context:** Implementation uses `os.urandom(8).hex()` (16-char hex string).
+
+**Impact:**
+- Collision probability?
+- Enough entropy for 100+ sessions?
+- Security implications (predictability?)
+
+**Found in:** `k10-mcp-server.py` line 356
+
+**Assumption made:** 16-char hex = 64-bit entropy, sufficient for non-adversarial use case
+
+**Calculation:** Birthday paradox: 1% collision after ~6 billion sessions (way more than needed)
+
+**Low priority:** Current approach sufficient
+
+---
+
+== Testing & Quality
+
+=== Q12: Automated Test Coverage
+
+**Question:** What is acceptable test coverage threshold for v1.0 release?
+
+**Context:** Currently 0% automated tests (manual only). Technical debt acknowledged.
+
+**Impact:**
+- Regression risk on changes
+- Release confidence low
+- Contributor friction (manual testing burden)
+
+**Found in:** `arc42/11-risks.adoc` - Technical Debt section
+
+**Assumption made:** 70% coverage (protocol + tools) acceptable for v1.0
+
+**Needs decision:** Define coverage targets per component
+
+---
+
+=== Q13: Memory Leak Detection Threshold
+
+**Question:** How much memory growth per 100 tool calls is acceptable?
+
+**Context:** Documentation says "should not leak >5KB" but no measured baseline.
+
+**Impact:**
+- Cannot detect leaks reliably
+- No regression test
+- Production stability unknown
+
+**Found in:** `onboarding/development-workflow.adoc`
+
+**Assumption made:** 5KB per 100 calls = 50 bytes per call (acceptable for embedded)
+
+**Testing needed:** Run 1000 tool calls, measure `gc.mem_free()` delta
+
+---
+
+== Security & Deployment
+
+=== Q14: Production Security Model
+
+**Question:** What authentication mechanism planned for v1.0?
+
+**Context:** Roadmap mentions "API key auth" but no design details.
+
+**Impact:**
+- Security architecture undefined
+- Cannot estimate implementation effort
+- Deployment guidance incomplete
+
+**Found in:** `arc42/01-introduction.adoc` - Roadmap Q4 2026
+
+**Assumption made:** Simple API key in HTTP header (e.g., `X-API-Key: secret123`)
+
+**Design needed:**
+- Key generation / distribution?
+- Key rotation?
+- Per-client keys or single shared key?
+
+---
+
+=== Q15: TLS/HTTPS Feasibility
+
+**Question:** Will MicroPython on ESP32 ever support TLS for HTTP server?
+
+**Context:** Documentation says "no TLS due to MicroPython limitations" but unclear if temporary or permanent.
+
+**Impact:**
+- Man-in-the-middle vulnerability on public WiFi
+- Cannot meet security requirements for some deployments
+- Forces trusted network requirement
+
+**Found in:** `arc42/03-context.adoc` - Security Boundaries
+
+**Assumption made:** TLS client supported, but not TLS server in MicroPython asyncio (as of 1.20)
+
+**Research needed:** Check MicroPython roadmap, ESP-IDF capabilities
+
+---
+
+== Documentation & Onboarding
+
+=== Q16: Typical Onboarding Success Rate
+
+**Question:** How many developers complete 4-week onboarding successfully?
+
+**Context:** Journey map created but never validated with real developers.
+
+**Impact:**
+- Onboarding guide might be too long/short
+- Validation questions might be wrong difficulty
+- Resource estimates uncertain
+
+**Found in:** `onboarding/journey-map.adoc`
+
+**Assumption made:** Senior developer with Python experience can complete in 4 weeks (160 hours)
+
+**Validation needed:** Run with 3+ new developers, collect feedback
+
+---
+
+=== Q17: Most Common Onboarding Blocker
+
+**Question:** What part of onboarding causes most confusion?
+
+**Context:** Journey map assumes linear progression, but learning rarely linear.
+
+**Impact:**
+- Might front-load wrong content
+- Support burden concentrated on specific topics
+- Documentation gaps not identified
+
+**Found in:** All onboarding docs
+
+**Assumption made:** Week 2 (protocol layer) hardest, Week 4 easiest
+
+**Data needed:** Survey of new contributors
+
+---
+
+== Roadmap & Future
+
+=== Q18: Arduino Port Timeline
+
+**Question:** When will Arduino/C++ version be ready?
+
+**Context:** Roadmap says Q3 2026 but no concrete plan or resources allocated.
+
+**Impact:**
+- Camera/ML features blocked until then
+- Users expect feature parity
+- Dual codebase maintenance burden
+
+**Found in:** `arc42/01-introduction.adoc` - Roadmap Q3 2026
+
+**Assumption made:** Solo developer, 3 months part-time (~150 hours effort)
+
+**Needs:** Resource commitment, design document for Arduino version
+
+---
+
+=== Q19: Multi-Board Support Scope
+
+**Question:** Which boards will be supported beyond K10?
+
+**Context:** Roadmap mentions ESP32-C3, RP2040 but no priority or requirements.
+
+**Impact:**
+- HAL abstraction layer needed
+- Testing matrix grows
+- Community contribution potential
+
+**Found in:** `arc42/01-introduction.adoc` - Roadmap Q3 2026
+
+**Assumption made:** ESP32-C3 (compatible), RP2040 (need new HAL)
+
+**Design needed:** Board abstraction layer architecture
+
+---
+
+=== Q20: MCP Sampling Implementation
+
+**Question:** How would sampling work on embedded device?
+
+**Context:** Roadmap mentions "MCP sampling support" (Q4 2026) but unclear how.
+
+**Impact:**
+- Might require async execution (conflicts with ADR-003)
+- Memory for sample buffers?
+- Client-initiated or server-push?
+
+**Found in:** `arc42/01-introduction.adoc` - Roadmap Q4 2026
+
+**Assumption made:** Client polls at interval, server doesn't push (stays request/response)
+
+**Research needed:** Study MCP sampling spec (when published)
+
+---
+
+== Inconsistencies Discovered
+
+=== Issue 1: Version Number Mismatch
+
+**Description:** 
+- Code says `version = "0.3.0"` (line 5)
+- Some docs reference v0.2
+- Boot message says "MCP v0.3"
+
+**Location:** Multiple files
+
+**Impact:** Low (cosmetic)
+
+**Fix needed:** Standardize version references
+
+---
+
+=== Issue 2: Tool Count Discrepancy
+
+**Description:**
+- Documentation says "14 tools"
+- Counted 13 in TOOLS array (need recount)
+
+**Location:** `arc42/05-building-blocks.adoc`
+
+**Impact:** Low (documentation accuracy)
+
+**Fix needed:** Automated count from code
+
+---
+
+=== Issue 3: Memory Numbers Inconsistent
+
+**Description:**
+- "512KB RAM total" (correct)
+- "100KB available" (after what? OS? Bootloader?)
+- "~20KB for display" (measured or estimated?)
+
+**Location:** Multiple files
+
+**Impact:** Medium (affects design decisions)
+
+**Fix needed:** Precise measurement with `gc.mem_free()` at each stage
+
+---
+
+== Priority Summary
+
+**CRITICAL (blocks development):**
+
+- Q1: WiFi vs ML conflict
+- Q2: MCP version upgrade path
+- Q14: Security model for v1.0
+
+**HIGH (affects quality):**
+
+- Q3: Session cleanup
+- Q9: Streaming support requirements
+- Q13: Memory leak threshold
+
+**MEDIUM (nice to know):**
+
+- Q4: Tool count limit
+- Q7: Display framebuffer size
+- Q18: Arduino port timeline
+
+**LOW (documentation gaps):**
+
+- Q8: LED brightness interpretation
+- Q10: CORS necessity
+- Issue 2: Tool count discrepancy
+
+---
+
+== Next Steps
+
+**For maintainer:**
+
+1. Review this document
+2. Answer CRITICAL questions first
+3. Create issues for HIGH priority items
+4. Schedule roadmap review for future items
+
+**For contributors:**
+
+1. Check if question blocks your work
+2. If yes, escalate to maintainer
+3. If no, document your assumptions clearly
+4. Test and validate assumptions when possible
+
+**For documentation:**
+
+1. As questions answered, move to appropriate doc
+2. Remove from this file
+3. Keep this file updated with new questions
+4. Review quarterly
+
+---
+
+== Changelog
+
+[cols="1,2,3",options="header"]
+|===
+|Date |Questions Added/Resolved |By
+
+|2024-11-20
+|Initial 20 questions documented
+|Claude Sonnet (mental model analysis)
+
+|[Future]
+|[Resolved Q1, Q2]
+|[Maintainer name]
+|===
+
+---
+
+**Remember:** It's better to document uncertainty than to present assumptions as facts.

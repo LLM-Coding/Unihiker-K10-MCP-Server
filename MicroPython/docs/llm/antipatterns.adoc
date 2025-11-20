@@ -1,0 +1,793 @@
+= Antipatterns: What NOT to Do
+:toc:
+
+== Purpose
+
+This document catalogs **common mistakes** and **wrong approaches** in K10 MCP Server development, along with correct alternatives.
+
+Learn from others' mistakes!
+
+---
+
+== Protocol & MCP Antipatterns
+
+=== ❌ Antipattern 1: Custom REST API Instead of MCP Tools
+
+**What it looks like:**
+
+```python
+@app.route('/set-led', methods=['POST'])
+async def set_led(request):
+    color = request.json.get('color')
+    rgb.write(num=-1, R=255, G=0, B=0)
+    return {'status': 'ok'}
+```
+
+**Why wrong:**
+
+* Claude can't discover endpoint (no tool schema)
+* Breaks MCP standard (not JSON-RPC)
+* Client must know exact URL structure
+* No type validation
+
+**✅ Correct approach:**
+
+```python
+# Add to TOOLS array
+TOOLS.append({
+    "name": "set_rgb_led",
+    "description": "Control RGB LEDs",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "r": {"type": "integer", "minimum": 0, "maximum": 255},
+            "g": {"type": "integer", "minimum": 0, "maximum": 255},
+            "b": {"type": "integer", "minimum": 0, "maximum": 255}
+        },
+        "required": ["r", "g", "b"]
+    }
+})
+
+# Implement in execute_tool()
+def execute_tool(name, arguments):
+    if name == "set_rgb_led":
+        r = arguments["r"]
+        g = arguments["g"]
+        b = arguments["b"]
+        rgb.write(num=-1, R=r, G=g, B=b)
+        return {"content": [{"type": "text", "text": f"LED set to RGB({r},{g},{b})"}]}
+```
+
+**Related:**
+
+* link:../arc42/08-concepts.adoc#concept-1[Concept: JSON-RPC as Universal Language]
+* link:../llm/knowledge-graph.adoc#mcp-protocol[Knowledge Graph: MCP Protocol]
+
+---
+
+=== ❌ Antipattern 2: Loose Tool Schema
+
+**What it looks like:**
+
+```python
+{
+    "name": "control_led",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "color": {"type": "string"}  # Too vague!
+        }
+    }
+}
+```
+
+**Why wrong:**
+
+* Claude doesn't know format: RGB? Hex? Name?
+* No validation (user might send "asdf")
+* Leads to runtime errors
+
+**Example failure:**
+```
+User: "Make LED purple"
+Claude: control_led(color="purple")
+Server: ValueError: unknown color 'purple'
+```
+
+**✅ Correct approach:**
+
+```python
+# Option 1: Explicit RGB values
+{
+    "name": "set_rgb_led",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "r": {"type": "integer", "minimum": 0, "maximum": 255},
+            "g": {"type": "integer", "minimum": 0, "maximum": 255},
+            "b": {"type": "integer", "minimum": 0, "maximum": 255}
+        },
+        "required": ["r", "g", "b"]
+    }
+}
+
+# Option 2: Enum of valid colors
+{
+    "name": "set_led_color",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "color": {
+                "type": "string",
+                "enum": ["red", "green", "blue", "white", "off"]
+            }
+        },
+        "required": ["color"]
+    }
+}
+```
+
+**Related:**
+
+* link:../arc42/08-concepts.adoc#concept-3[Concept: Tool Schema = Contract]
+
+---
+
+=== ❌ Antipattern 3: Missing Error Handling in Tools
+
+**What it looks like:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "get_temperature":
+        temp = temp_humi.read_temp()  # Uncaught OSError!
+        return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+```
+
+**Why wrong:**
+
+* I2C timeout or sensor disconnect → OSError → server crash
+* User sees "500 Internal Server Error" with no context
+* Poor debugging experience
+
+**✅ Correct approach:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "get_temperature":
+        try:
+            temp = temp_humi.read_temp()
+            return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+        except OSError as e:
+            return {
+                "content": [{"type": "text", "text": f"Sensor error: {e}. Check wiring."}],
+                "isError": True
+            }
+```
+
+**Even better (with validation):**
+
+```python
+try:
+    temp = temp_humi.read_temp()
+    
+    # Validate reading
+    if temp == 0.0 or temp != temp:  # NaN check
+        return {
+            "content": [{"type": "text", "text": "Invalid sensor reading (0 or NaN)"}],
+            "isError": True
+        }
+    
+    if temp < -40 or temp > 85:  # AHT20 range
+        return {
+            "content": [{"type": "text", "text": f"Out-of-range reading: {temp}°C"}],
+            "isError": True
+        }
+    
+    return {"content": [{"type": "text", "text": f"Temperature: {temp}°C"}]}
+    
+except OSError:
+    return {
+        "content": [{"type": "text", "text": "Sensor not responding. Check I2C connection."}],
+        "isError": True
+    }
+```
+
+**Related:**
+
+* link:../arc42/08-concepts.adoc#concept-5[Concept: Error Handling Philosophy]
+* link:../onboarding/common-issues.adoc#issue-4[Common Issue: Sensor returns 0 or NaN]
+
+---
+
+== State Management Antipatterns
+
+=== ❌ Antipattern 4: Storing Tool State in Globals
+
+**What it looks like:**
+
+```python
+current_led_color = (0, 0, 0)  # Global state!
+
+def execute_tool(name, arguments):
+    global current_led_color
+    
+    if name == "toggle_led":
+        if current_led_color == (0, 0, 0):
+            current_led_color = (255, 0, 0)
+        else:
+            current_led_color = (0, 0, 0)
+        
+        rgb.write(num=-1, R=current_led_color[0], ...)
+```
+
+**Why wrong:**
+
+* State lost on server restart
+* Race conditions if multi-client support added
+* Hard to debug (hidden state)
+* Violates stateless design principle
+
+**✅ Correct approach:**
+
+```python
+# Make state explicit - client tracks it
+{
+    "name": "set_rgb_led",
+    "inputSchema": {
+        "properties": {
+            "r": {"type": "integer"},
+            "g": {"type": "integer"},
+            "b": {"type": "integer"}
+        }
+    }
+}
+
+# Client (Claude) decides:
+# - Want red? Call set_rgb_led(255, 0, 0)
+# - Want toggle? Client remembers current state, sends opposite
+```
+
+**If state MUST be stored:**
+
+```python
+# Use session storage (at least scoped per client)
+def execute_tool(name, arguments):
+    session_id = get_current_session_id()
+    
+    if name == "toggle_led":
+        current = sessions[session_id].get('led_color', (0, 0, 0))
+        new_color = (255, 0, 0) if current == (0, 0, 0) else (0, 0, 0)
+        sessions[session_id]['led_color'] = new_color
+        rgb.write(num=-1, R=new_color[0], ...)
+```
+
+**Related:**
+
+* link:../arc42/08-concepts.adoc#concept-2[Concept: Stateless Tool Execution]
+* link:../arc42/04-solution-strategy.adoc#decision-4[ADR-004: Session Management]
+
+---
+
+=== ❌ Antipattern 5: Session Dict Growing Unbounded
+
+**What it looks like:**
+
+```python
+sessions = {}
+
+def handle_mcp_request(request_data, session_id):
+    if not session_id:
+        session_id = generate_id()
+        sessions[session_id] = {"created": time.time()}  # Never cleaned up!
+```
+
+**Why wrong:**
+
+* After 100 connections → 100 dict entries in RAM
+* Memory leak → eventual MemoryError → crash
+* ESP32 has limited RAM (100KB available)
+
+**✅ Correct approach:**
+
+```python
+MAX_SESSIONS = 10
+SESSION_TIMEOUT = 3600  # 1 hour
+
+def cleanup_sessions():
+    """Remove expired or excess sessions"""
+    now = time.time()
+    
+    # Remove expired
+    expired = [sid for sid, data in sessions.items() 
+               if now - data['created'] > SESSION_TIMEOUT]
+    for sid in expired:
+        del sessions[sid]
+    
+    # Remove oldest if too many
+    if len(sessions) > MAX_SESSIONS:
+        oldest = sorted(sessions.items(), key=lambda x: x[1]['created'])[:len(sessions) - MAX_SESSIONS]
+        for sid, _ in oldest:
+            del sessions[sid]
+
+def handle_mcp_request(request_data, session_id):
+    cleanup_sessions()  # Periodic cleanup
+    
+    if not session_id:
+        session_id = generate_id()
+        sessions[session_id] = {"created": time.time()}
+```
+
+**Related:**
+
+* link:../arc42/11-risks.adoc#issue-10[Risk: MemoryError after prolonged use]
+
+---
+
+== Hardware Interaction Antipatterns
+
+=== ❌ Antipattern 6: Forgetting show_draw() After Display Operations
+
+**What it looks like:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "display_text":
+        text = arguments["text"]
+        screen.draw_text(text=text, line=4, font_size=20, color=0xFFFFFF)
+        # Missing: screen.show_draw()!
+        return {"content": [{"type": "text", "text": "Displayed"}]}
+```
+
+**Why wrong:**
+
+* Display has framebuffer, must flush to show changes
+* Tool returns success, but nothing visible
+* User confused: "Tool says it worked but I see nothing"
+
+**✅ Correct approach:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "display_text":
+        text = arguments["text"]
+        screen.draw_text(text=text, line=4, font_size=20, color=0xFFFFFF)
+        screen.show_draw()  # ← CRITICAL
+        return {"content": [{"type": "text", "text": f"Displayed: {text}"}]}
+```
+
+**Related:**
+
+* link:../onboarding/common-issues.adoc#issue-6[Common Issue: Display not updating]
+* link:../arc42/08-concepts.adoc[Unwritten Rule: Always call show_draw()]
+
+---
+
+=== ❌ Antipattern 7: Calling HAL Without Retry on Timeout
+
+**What it looks like:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "get_temperature":
+        temp = temp_humi.read_temp()  # Might timeout
+        return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+```
+
+**Why wrong:**
+
+* I2C bus occasionally busy
+* Single timeout → tool failure
+* User frustrated by intermittent failures
+
+**✅ Correct approach:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "get_temperature":
+        for attempt in range(3):  # Retry up to 3 times
+            try:
+                temp = temp_humi.read_temp()
+                return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+            except OSError as e:
+                if attempt < 2:
+                    time.sleep(0.05)  # Brief delay
+                    continue
+                else:
+                    return {
+                        "content": [{"type": "text", "text": f"Sensor timeout after 3 attempts: {e}"}],
+                        "isError": True
+                    }
+```
+
+**Related:**
+
+* link:../arc42/11-risks.adoc[Post-mortem: I2C Bus Collision]
+
+---
+
+=== ❌ Antipattern 8: Modifying Vendor HAL Module
+
+**What it looks like:**
+
+```python
+# Trying to "fix" HAL
+import unihiker_k10.rgb
+
+def my_fixed_write(num, R, G, B):
+    # Custom implementation
+    pass
+
+unihiker_k10.rgb.write = my_fixed_write  # Monkey patching!
+```
+
+**Why wrong:**
+
+* Binary module may not allow monkey-patching
+* Breaks on vendor updates
+* Hides real issue from vendor
+* Other code expecting standard behavior gets confused
+
+**✅ Correct approach:**
+
+```python
+# Create wrapper with workaround
+def safe_rgb_write(num, r, g, b):
+    """
+    Wrapper for rgb.write() with workaround for I2C timeout bug.
+    
+    Known issue: Rapid calls (<50ms apart) cause timeout.
+    Workaround: Add delay before retry.
+    
+    Reported to vendor: 2024-11-15
+    """
+    try:
+        rgb.write(num=num, R=r, G=g, B=b)
+    except OSError:
+        time.sleep(0.05)
+        rgb.write(num=num, R=r, G=g, B=b)
+
+# Use wrapper in tools
+def execute_tool(name, arguments):
+    if name == "set_rgb_led":
+        safe_rgb_write(num=-1, r=arguments["r"], ...)
+```
+
+**Related:**
+
+* link:../arc42/08-concepts.adoc#concept-4[Concept: HAL as Black Box]
+
+---
+
+== Code Structure Antipatterns
+
+=== ❌ Antipattern 9: Separate Function Per Tool
+
+**What it looks like:**
+
+```python
+def tool_set_rgb_led(arguments):
+    r = arguments["r"]
+    # ...
+
+def tool_get_temperature(arguments):
+    temp = temp_humi.read_temp()
+    # ...
+
+def execute_tool(name, arguments):
+    if name == "set_rgb_led":
+        return tool_set_rgb_led(arguments)
+    elif name == "get_temperature":
+        return tool_get_temperature(arguments)
+    # ... 14 separate functions
+```
+
+**Why wrong:**
+
+* Verbose (14 function definitions)
+* Each needs own error handling (code duplication)
+* Harder to see all tools at once
+* Function call overhead (minor but unnecessary)
+
+**✅ Correct approach:**
+
+```python
+def execute_tool(name, arguments):
+    """Single dispatcher with inline implementations"""
+    try:
+        if name == "set_rgb_led":
+            r = arguments["r"]
+            g = arguments["g"]
+            b = arguments["b"]
+            rgb.write(num=-1, R=r, G=g, B=b)
+            return {"content": [{"type": "text", "text": f"LED set to RGB({r},{g},{b})"}]}
+        
+        elif name == "get_temperature":
+            temp = temp_humi.read_temp()
+            return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+        
+        # ... other tools
+        
+    except Exception as e:
+        # Shared error handling
+        return {
+            "content": [{"type": "text", "text": f"Error: {e}"}],
+            "isError": True
+        }
+```
+
+**When separate functions ARE appropriate:**
+
+* Tool logic >20 lines
+* Shared logic between multiple tools
+* Complex algorithm needs separate testing
+
+**Related:**
+
+* link:../arc42/05-building-blocks.adoc[Building Blocks: Tool Executors]
+
+---
+
+=== ❌ Antipattern 10: External Config File for Tools
+
+**What it looks like:**
+
+```python
+# tools.json
+[
+  {"name": "set_rgb_led", "inputSchema": {...}},
+  {"name": "get_temperature", "inputSchema": {...}}
+]
+
+# k10-mcp-server.py
+with open('tools.json') as f:
+    TOOLS = json.load(f)
+```
+
+**Why wrong:**
+
+* SD card unreliable (corruption after many writes)
+* Slower startup (30ms file I/O penalty)
+* Schema and code can drift (no type checking)
+* One more thing that can fail (file not found)
+
+**✅ Correct approach:**
+
+```python
+# Inline in code
+TOOLS = [
+    {
+        "name": "set_rgb_led",
+        "inputSchema": {...}
+    },
+    {
+        "name": "get_temperature",
+        "inputSchema": {...}
+    }
+]
+```
+
+**Benefits:**
+
+* Schema and implementation colocated (can't drift)
+* Faster startup (no file I/O)
+* One less failure point
+* Easy navigation (jump to definition)
+
+**When external config IS appropriate:**
+
+* Plugin system (dynamic tool loading)
+* Non-programmer needs to add tools
+* 50+ tools (code file too large)
+
+**Related:**
+
+* link:../arc42/04-solution-strategy.adoc#decision-5[ADR-005: Tool Schema in Code]
+* link:../arc42/11-risks.adoc[Post-mortem: SD Card Corruption]
+
+---
+
+== Testing Antipatterns
+
+=== ❌ Antipattern 11: Only Testing with Claude Desktop
+
+**What it looks like:**
+
+```
+Developer: *implements tool, uploads to K10*
+Developer: "Hey Claude, try the new tool"
+Claude: "I don't have that tool"
+Developer: "Hmm, must be broken, let me debug..."
+*30 minutes of debugging Claude Desktop config*
+```
+
+**Why wrong:**
+
+* Can't isolate issue: Is it server or client?
+* Claude Desktop has caching, config issues
+* Slow iteration (restart Claude each time)
+* Debugging blind (no direct feedback)
+
+**✅ Correct approach:**
+
+```bash
+# Step 1: Test with curl FIRST
+curl -X POST http://192.168.1.100:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
+
+# Verify tool appears in list
+
+# Step 2: Test tool execution with curl
+curl -X POST http://192.168.1.100:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"YOUR_TOOL","arguments":{}}}' | jq
+
+# Confirm correct response
+
+# Step 3: THEN test with Claude Desktop
+```
+
+**Benefits:**
+
+* Fast iteration (no restart needed)
+* Clear error messages
+* Isolates server issues from client issues
+* Can test edge cases easily
+
+**Related:**
+
+* link:../onboarding/development-workflow.adoc#testing-strategy[Development Workflow: Testing]
+* link:../arc42/08-concepts.adoc[Unwritten Rule: Test with curl first]
+
+---
+
+=== ❌ Antipattern 12: Not Checking Memory Impact
+
+**What it looks like:**
+
+```python
+# Add huge buffer without checking
+LARGE_BUFFER = [0] * 50000  # 200KB allocation!
+
+def execute_tool(name, arguments):
+    # ... use buffer
+```
+
+**Why wrong:**
+
+* ESP32 has 100KB available RAM
+* Instant MemoryError
+* Server crashes
+* No warning during development
+
+**✅ Correct approach:**
+
+```python
+# Before any large allocation
+import gc
+
+print(f"Free RAM before: {gc.mem_free()}")  # e.g., 95000 bytes
+
+# Try allocation
+try:
+    buffer = [0] * 10000  # 40KB
+except MemoryError:
+    print("Not enough memory!")
+    return
+
+print(f"Free RAM after: {gc.mem_free()}")  # e.g., 55000 bytes
+
+# Cleanup when done
+del buffer
+gc.collect()
+```
+
+**Continuous monitoring:**
+
+```python
+# Add to startup
+def memory_monitor():
+    while True:
+        free = gc.mem_free()
+        if free < 10000:  # Warning threshold
+            print(f"⚠️ Low memory: {free} bytes")
+        time.sleep(60)
+
+# Run in background (if asyncio)
+```
+
+**Related:**
+
+* link:../arc42/11-risks.adoc#issue-10[Risk: MemoryError]
+* link:../llm/knowledge-graph.adoc#memory-management[Knowledge Graph: Memory Management]
+
+---
+
+== Security Antipatterns
+
+=== ❌ Antipattern 13: No Input Validation Beyond Schema
+
+**What it looks like:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "display_text":
+        text = arguments["text"]  # Blindly trust input
+        screen.draw_text(text=text, ...)
+```
+
+**Why wrong:**
+
+* Schema validates type, not content
+* User could send 1000-char string (crashes display)
+* Special characters might cause issues
+* Path traversal if filenames involved
+
+**✅ Correct approach:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "display_text":
+        text = arguments["text"]
+        
+        # Length limit (display width ~30 chars)
+        if len(text) > 30:
+            text = text[:27] + "..."
+        
+        # Remove control characters
+        text = ''.join(c for c in text if c.isprintable() or c in '\n\t')
+        
+        # Sanitize if needed
+        text = text.replace('<', '&lt;').replace('>', '&gt;')
+        
+        screen.draw_text(text=text, ...)
+```
+
+**Related:**
+
+* link:../arc42/11-risks.adoc[Security Issues]
+
+---
+
+## Summary: Most Common Mistakes
+
+Top 5 mistakes by frequency:
+
+1. **Forgetting try/except around HAL** (80% of crashes)
+2. **Missing `show_draw()` after display ops** (50% of "not working" reports)
+3. **Testing only with Claude, skipping curl** (delays debugging 10x)
+4. **Loose tool schemas** (causes confusing Claude errors)
+5. **Storing state in globals** (violates stateless design)
+
+---
+
+## Anti-Antipattern: When to Break the Rules
+
+Some "antipatterns" are OK in specific contexts:
+
+**External config OK if:**
+
+* Building plugin system
+* Tools >50 (file size management)
+* Non-programmers adding tools
+
+**Separate functions OK if:**
+
+* Tool logic complex (>30 lines)
+* Shared between multiple tools
+* Needs unit testing in isolation
+
+**Async execution OK if:**
+
+* Adding WebSocket transport (needs bidirectional)
+* Camera capture (long operation ~500ms)
+* Concurrent sensor polling needed
+
+**Global state OK if:**
+
+* Truly global (e.g., hardware calibration constants)
+* Documented clearly
+* Never modified after init
+
+**Rule of thumb:** Know why the pattern exists, then decide if exception justified.

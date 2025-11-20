@@ -1,0 +1,563 @@
+= LLM Knowledge Graph for K10 MCP Server
+:toc:
+
+== Purpose
+
+This file provides **structured knowledge** for Large Language Models (LLMs) to efficiently navigate and understand the K10 MCP Server codebase.
+
+Format: YAML-like structure optimized for LLM consumption.
+
+---
+
+== Concept Hierarchy
+
+[source,yaml]
+----
+concepts:
+  # === LEVEL 0: FUNDAMENTAL (Must understand first) ===
+  
+  - name: "MCP Protocol"
+    level: 0
+    priority: CRITICAL
+    prerequisites: []
+    enables: ["JSON-RPC Handling", "Tool Discovery", "Claude Integration"]
+    learning_time: "30 minutes"
+    description: >
+      Model Context Protocol - standardized way for AI assistants to discover and use tools.
+      Based on JSON-RPC 2.0. Client calls methods like `tools/list` to discover, `tools/call` to execute.
+    common_mistakes:
+      - mistake: "Trying to add REST endpoints instead of MCP tools"
+        why: "Breaks discoverability - Claude won't know tool exists"
+        correct: "Add tool schema to TOOLS array, implement in execute_tool()"
+      - mistake: "Using custom JSON format instead of JSON-RPC 2.0"
+        why: "MCP clients expect specific structure with jsonrpc, id, method, params"
+        correct: "Follow JSON-RPC 2.0 spec exactly: {jsonrpc:2.0, id:X, method:Y, params:Z}"
+    validation: "How does Claude discover what tools are available on the K10 server?"
+    answer: "Calls tools/list method, receives array of tool schemas with names and inputSchema"
+    code_locations:
+      - "TOOLS array (lines 28-165)"
+      - "handle_mcp_request() tools/list case (lines 310-315)"
+    links:
+      - "https://spec.modelcontextprotocol.io/"
+      - "../arc42/08-concepts.adoc#concept-1"
+  
+  - name: "JSON-RPC 2.0"
+    level: 0
+    priority: CRITICAL
+    prerequisites: []
+    enables: ["MCP Protocol", "Request Handling"]
+    learning_time: "20 minutes"
+    description: >
+      Remote procedure call protocol. Every request has: jsonrpc, id, method, params.
+      Responses have: jsonrpc, id, result (or error).
+      Used as transport layer for MCP.
+    common_mistakes:
+      - mistake: "Forgetting 'id' field in response"
+        why: "Client can't match response to request"
+        correct: "Always copy 'id' from request to response"
+    validation: "What are the 4 required fields in a JSON-RPC request?"
+    answer: "jsonrpc (version), id (request ID), method (function name), params (arguments)"
+    code_locations:
+      - "handle_mcp_request() (lines 283-335)"
+    links:
+      - "https://www.jsonrpc.org/specification"
+
+  - name: "Stateless Tool Execution"
+    level: 0
+    priority: HIGH
+    prerequisites: []
+    enables: ["Tool Implementation", "Error Handling"]
+    learning_time: "15 minutes"
+    description: >
+      Each tool call is independent. No state persists between calls.
+      Tools operate on absolute state (set LED to red) not relative (toggle LED).
+    common_mistakes:
+      - mistake: "Storing tool state in global variables"
+        why: "Lost on restart, causes race conditions, hard to debug"
+        correct: "Make state explicit in tool arguments, let client track state"
+      - mistake: "Implementing 'toggle_led' that remembers previous state"
+        why: "Server doesn't remember, will break"
+        correct: "Implement 'set_led' with explicit color, client decides what to set"
+    validation: "What happens if server restarts while LED is on?"
+    answer: "LED stays on (hardware retains state) but server forgets. Client should re-initialize."
+    code_locations:
+      - "execute_tool() function (lines 168-280)"
+    links:
+      - "../arc42/08-concepts.adoc#concept-2"
+
+  # === LEVEL 1: ARCHITECTURE (Core design) ===
+
+  - name: "HTTP Transport Layer"
+    level: 1
+    priority: HIGH
+    prerequisites: ["JSON-RPC 2.0", "MCP Protocol"]
+    enables: ["Client-Server Communication", "CORS Handling"]
+    learning_time: "30 minutes"
+    description: >
+      Uses HTTP POST to /mcp endpoint for all MCP communication.
+      Chose HTTP over SSE due to MicroPython maturity, reliability.
+      Single endpoint handles all JSON-RPC methods.
+    common_mistakes:
+      - mistake: "Creating separate endpoints for each MCP method"
+        why: "JSON-RPC already has method dispatch, adds unnecessary complexity"
+        correct: "Single /mcp endpoint, dispatch on 'method' field in JSON"
+    validation: "Why HTTP instead of Server-Sent Events (SSE)?"
+    answer: "SSE immature in MicroPython, caused connection drops. HTTP simpler, more reliable."
+    code_locations:
+      - "@app.route('/mcp') (lines 338-377)"
+      - "ADR-001 (arc42/09-decisions/ADR-001-http-transport.adoc)"
+    decision_rationale: "ADR-001"
+
+  - name: "Component Architecture"
+    level: 1
+    priority: HIGH
+    prerequisites: []
+    enables: ["Code Navigation", "Debugging", "Feature Development"]
+    learning_time: "45 minutes"
+    description: >
+      Layered architecture: HTTP Server → Protocol Handler → Tool Executors → HAL → Hardware.
+      Each layer has single responsibility. Unidirectional flow (no callbacks).
+    common_mistakes:
+      - mistake: "Calling HAL directly from HTTP routes"
+        why: "Bypasses error handling, breaks separation of concerns"
+        correct: "HTTP route → handle_mcp_request() → execute_tool() → HAL"
+    validation: "Draw component diagram with 5 layers from memory"
+    answer: "See arc42/05-building-blocks.adoc diagram"
+    code_locations:
+      - "Entire k10-mcp-server.py organized by layer"
+    links:
+      - "../arc42/05-building-blocks.adoc"
+
+  - name: "Tool Schema Contract"
+    level: 1
+    priority: HIGH
+    prerequisites: ["JSON-RPC 2.0", "MCP Protocol"]
+    enables: ["Tool Discovery", "Claude Integration", "Input Validation"]
+    learning_time: "30 minutes"
+    description: >
+      inputSchema defines contract between client and server using JSON Schema.
+      Claude uses this to generate prompts and validate arguments.
+      Precise schemas critical (e.g., minimum: 0 prevents negative brightness).
+    common_mistakes:
+      - mistake: "Vague schema like {color: {type: string}}"
+        why: "Claude doesn't know format - RGB? Hex? Name?"
+        correct: "Explicit: {r: {type: integer, min: 0, max: 255}, g: ..., b: ...}"
+      - mistake: "Schema doesn't match implementation"
+        why: "Claude sends valid args per schema, but code rejects them"
+        correct: "Keep schema and implementation in sync, test both"
+    validation: "User says 'Turn LED green'. How does Claude know to call set_rgb_led(0, 255, 0)?"
+    answer: "Tool schema specifies integer r,g,b params, Claude translates 'green' to (0, 255, 0)"
+    code_locations:
+      - "TOOLS array (lines 28-165)"
+    links:
+      - "../arc42/08-concepts.adoc#concept-3"
+
+  # === LEVEL 2: IMPLEMENTATION (How to code) ===
+
+  - name: "HAL (Hardware Abstraction Layer)"
+    level: 2
+    priority: MEDIUM
+    prerequisites: ["Component Architecture"]
+    enables: ["Hardware Control", "Sensor Reading"]
+    learning_time: "1 hour"
+    description: >
+      unihiker_k10 module provides Python API for hardware (rgb, screen, sensors, wifi).
+      Vendor-provided, binary, closed-source. Treat as black box.
+      All HAL calls must be wrapped in try/except.
+    common_mistakes:
+      - mistake: "Uncaught OSError from HAL call crashes server"
+        why: "I2C timeout, sensor disconnect common, must handle"
+        correct: "Wrap in try/except, return {isError: true, content: [error message]}"
+      - mistake: "Trying to 'fix' HAL bugs by modifying module"
+        why: "Binary module, can't modify. Breaks on updates."
+        correct: "Create wrapper function with workaround, document in comment"
+    validation: "Display sometimes doesn't update. How to debug without HAL source?"
+    answer: "1) Check wiring 2) Add sleep before show_draw() 3) Test different timing 4) Document workaround"
+    code_locations:
+      - "execute_tool() HAL calls (lines 168-280)"
+      - "HAL imports (lines 10-13)"
+    links:
+      - "../arc42/08-concepts.adoc#concept-4"
+
+  - name: "Error Handling Philosophy"
+    level: 2
+    priority: CRITICAL
+    prerequisites: ["Stateless Execution"]
+    enables: ["Robust Implementation", "Good UX"]
+    learning_time: "30 minutes"
+    description: >
+      Never crash the server. Always return valid MCP response, even on error.
+      Errors are data, not control flow. Use {isError: true} in MCP result.
+    common_mistakes:
+      - mistake: "Letting exceptions bubble to HTTP layer"
+        why: "Client sees generic 500 error, no context"
+        correct: "Catch in execute_tool(), wrap in MCP error format"
+      - mistake: "Returning None or empty response on error"
+        why: "Client doesn't know what happened"
+        correct: "Return {content: [{type: text, text: 'Error: ...'}], isError: true}"
+    validation: "I2C bus broken, sensor doesn't respond. What happens?"
+    answer: "HAL raises OSError → caught by execute_tool() → returns {isError:true} with message → server stays running"
+    code_locations:
+      - "execute_tool() try/except (lines 272-280)"
+      - "mcp_endpoint() error handler (lines 363-377)"
+    links:
+      - "../arc42/08-concepts.adoc#concept-5"
+
+  - name: "Memory Management"
+    level: 2
+    priority: MEDIUM
+    prerequisites: []
+    enables: ["Long-term Stability"]
+    learning_time: "45 minutes"
+    description: >
+      ESP32 has 512KB RAM, ~100KB available. Must be careful with allocations.
+      Use gc.mem_free() to monitor. Add periodic garbage collection.
+      Avoid large string concatenations, prefer f-strings.
+    common_mistakes:
+      - mistake: "Session dict grows unbounded"
+        why: "Each initialize creates entry, never cleaned up"
+        correct: "Add session expiration or max limit"
+      - mistake: "Creating large buffers without checking memory"
+        why: "MemoryError crashes server"
+        correct: "Check gc.mem_free() first, allocate in chunks if needed"
+    validation: "After 100 tool calls, how to check for memory leaks?"
+    answer: "gc.collect() → gc.mem_free() before and after, should be similar (±5KB tolerance)"
+    code_locations:
+      - "Session storage (line 25)"
+      - "Periodic GC in mcp_endpoint() (future enhancement)"
+    links:
+      - "../arc42/11-risks.adoc#issue-10"
+
+  - name: "Adding New Tools"
+    level: 2
+    priority: HIGH
+    prerequisites: ["Tool Schema Contract", "Error Handling"]
+    enables: ["Feature Development"]
+    learning_time: "1 hour"
+    description: >
+      Two-step process: 1) Add schema to TOOLS array 2) Add implementation to execute_tool().
+      Schema must match implementation exactly. Test with curl before Claude.
+    common_mistakes:
+      - mistake: "Only adding implementation, forgetting schema"
+        why: "Tool won't be discovered by Claude"
+        correct: "Always add both schema and implementation"
+      - mistake: "Schema has 'required' field but implementation uses .get()"
+        why: "Implementation allows missing field, schema doesn't"
+        correct: "If required in schema, use arguments['field'] not .get()"
+    validation: "Add new tool 'blink_led'. What are the 5 steps?"
+    answer: "1) Design schema 2) Add to TOOLS 3) Implement in execute_tool() 4) Test curl 5) Test Claude"
+    code_locations:
+      - "TOOLS array (lines 28-165)"
+      - "execute_tool() (lines 168-280)"
+    links:
+      - "../arc42/08-concepts.adoc#pattern-1"
+      - "../onboarding/journey-map.adoc#day-10"
+
+  - name: "Debugging Workflow"
+    level: 2
+    priority: HIGH
+    prerequisites: []
+    enables: ["Problem Solving"]
+    learning_time: "1 hour"
+    description: >
+      Always test with curl before Claude (isolates issues).
+      Watch REPL for print statements and tracebacks.
+      Add logging to execute_tool() for specific issues.
+    common_mistakes:
+      - mistake: "Only testing with Claude, skipping curl"
+        why: "Can't tell if issue is server or Claude Desktop config"
+        correct: "Test curl first, confirms server works, then test Claude"
+      - mistake: "Not checking REPL output"
+        why: "Missing valuable error messages and tracebacks"
+        correct: "Always have Thonny REPL open when debugging"
+    validation: "Tool works in curl but not Claude. What's debugging process?"
+    answer: "1) Check CORS 2) Verify JSON-RPC format 3) Check Claude logs 4) Restart Claude Desktop"
+    code_locations:
+      - "Debugging patterns in onboarding/common-issues.adoc"
+    links:
+      - "../onboarding/common-issues.adoc"
+      - "../onboarding/development-workflow.adoc#debugging-workflow"
+
+# === Cross-Cutting Concepts ===
+
+  - name: "Synchronous Execution Model"
+    level: 1
+    priority: MEDIUM
+    prerequisites: ["Component Architecture"]
+    enables: ["Simple Mental Model", "Hardware Safety"]
+    learning_time: "20 minutes"
+    description: >
+      Tools execute synchronously (blocking). One request at a time.
+      Avoids I2C bus collisions, race conditions. Simpler than async.
+    common_mistakes:
+      - mistake: "Trying to make tools async for 'performance'"
+        why: "Hardware is serial anyway (I2C), no benefit, adds complexity"
+        correct: "Keep synchronous, it's fast enough (<100ms per tool)"
+    validation: "Why synchronous instead of async tool execution?"
+    answer: "Hardware fast (<10ms), avoids I2C collision, simpler code, no real benefit from async (ADR-003)"
+    code_locations:
+      - "execute_tool() is synchronous function"
+      - "ADR-003 (arc42/09-decisions/)"
+    decision_rationale: "ADR-003"
+
+  - name: "Session Management"
+    level: 2
+    priority: LOW
+    prerequisites: ["MCP Protocol"]
+    enables: ["Multi-client Support"]
+    learning_time: "15 minutes"
+    description: >
+      Simple in-memory dict: sessions = {}.
+      Tracks MCP session IDs via Mcp-Session-Id header.
+      Generated on initialize if missing.
+    common_mistakes:
+      - mistake: "Storing tool state in session"
+        why: "Tools should be stateless"
+        correct: "Only store session metadata, not tool state"
+    validation: "Where is session ID stored and what happens on restart?"
+    answer: "In 'sessions' dict in RAM. Lost on restart (acceptable for dev tool)."
+    code_locations:
+      - "sessions dict (line 25)"
+      - "Session creation (lines 354-359)"
+    links:
+      - "../arc42/04-solution-strategy.adoc#decision-4"
+----
+
+== Knowledge Dependencies Graph
+
+[plantuml, knowledge-graph, svg]
+----
+@startuml
+!include <C4/C4_Context>
+
+' Level 0 - Fundamentals
+component "MCP Protocol" as mcp #LightBlue
+component "JSON-RPC 2.0" as jsonrpc #LightBlue
+component "Stateless Execution" as stateless #LightBlue
+
+' Level 1 - Architecture
+component "HTTP Transport" as http #LightGreen
+component "Component Architecture" as components #LightGreen
+component "Tool Schema" as schema #LightGreen
+component "Sync Execution" as sync #LightGreen
+
+' Level 2 - Implementation
+component "HAL" as hal #Yellow
+component "Error Handling" as errors #Yellow
+component "Memory Management" as memory #Yellow
+component "Adding Tools" as addtools #Yellow
+component "Debugging" as debug #Yellow
+component "Sessions" as sessions #Yellow
+
+' Dependencies
+jsonrpc --> mcp
+mcp --> http
+mcp --> schema
+jsonrpc --> http
+
+stateless --> errors
+stateless --> addtools
+
+components --> hal
+components --> debug
+
+mcp --> addtools
+schema --> addtools
+
+http --> errors
+hal --> errors
+
+sync --> components
+sync --> hal
+
+mcp --> sessions
+
+@enduml
+----
+
+== Learning Paths
+
+=== Path 1: Quick Start (2 hours)
+
+For LLM needing to answer specific question:
+
+1. Read: MCP Protocol concept
+2. Read: Component Architecture concept
+3. Skim: Code locations mentioned
+4. Answer question
+
+---
+
+=== Path 2: Code Contribution (4 hours)
+
+For LLM implementing new feature:
+
+1. **Understand protocol** (30 min)
+   - MCP Protocol
+   - JSON-RPC 2.0
+   - Tool Schema
+
+2. **Understand architecture** (30 min)
+   - Component Architecture
+   - HTTP Transport
+   - Stateless Execution
+
+3. **Learn implementation** (2 hours)
+   - Adding New Tools
+   - Error Handling
+   - HAL usage
+   - Testing with curl
+
+4. **Code** (1 hour)
+   - Implement tool
+   - Test
+   - Document
+
+---
+
+=== Path 3: Debugging Issue (1 hour)
+
+For LLM helping troubleshoot:
+
+1. **Identify layer** (5 min)
+   - Network? → HTTP Transport
+   - Protocol? → MCP Protocol
+   - Hardware? → HAL
+   - Logic? → Tool Implementation
+
+2. **Read relevant concept** (15 min)
+   - Focus on common_mistakes
+
+3. **Check troubleshooting guide** (10 min)
+   - onboarding/common-issues.adoc
+
+4. **Provide solution** (30 min)
+   - Specific code fix
+   - Prevention strategy
+
+---
+
+== Prompt Templates for LLMs
+
+=== Template: Answer Architecture Question
+
+```
+Context: K10 MCP Server - embedded MCP server on ESP32
+Question: {user_question}
+
+Step 1: Identify relevant concepts
+[List 2-3 concepts from knowledge graph]
+
+Step 2: Extract key information
+[Summarize from concept descriptions]
+
+Step 3: Provide answer with code location
+Answer: {concise_answer}
+Code: {file}:{lines}
+Reference: {link_to_doc}
+```
+
+---
+
+=== Template: Implement New Feature
+
+```
+Task: Implement {feature_name}
+
+Step 1: Design tool schema
+- name: {tool_name}
+- description: {what_it_does}
+- inputSchema: {json_schema}
+
+Step 2: Implementation location
+File: k10-mcp-server.py
+Insert in:
+  - TOOLS array (after line 165)
+  - execute_tool() (after line 270)
+
+Step 3: Error handling
+Wrap HAL call in try/except
+Return {isError: true} on failure
+
+Step 4: Testing
+curl -X POST http://IP:8080/mcp -d '...'
+
+Step 5: Documentation
+Update: README.md tool list
+```
+
+---
+
+=== Template: Debug Issue
+
+```
+Issue: {symptom_description}
+
+Step 1: Classify
+Layer: [Network / Protocol / Hardware / Logic]
+Priority: [CRITICAL / HIGH / MEDIUM / LOW]
+
+Step 2: Check common issues
+Reference: onboarding/common-issues.adoc#{issue_id}
+
+Step 3: Debugging steps
+1. {step_1}
+2. {step_2}
+3. {step_3}
+
+Step 4: Root cause hypothesis
+Likely cause: {hypothesis}
+Why: {reasoning}
+
+Step 5: Fix
+Code change: {specific_edit}
+Prevention: {how_to_avoid_future}
+```
+
+---
+
+== Quick Reference: Where to Find Things
+
+[cols="2,3",options="header"]
+|===
+|Need to... |Look here
+
+|Understand WHY decision made
+|arc42/09-decisions/ADR-*.adoc
+
+|Understand WHAT system does
+|arc42/01-introduction.adoc
+
+|Understand HOW code works
+|arc42/05-building-blocks.adoc
+
+|Add new tool
+|This file → "Adding New Tools" concept
+
+|Debug issue
+|onboarding/common-issues.adoc
+
+|Learn as newcomer
+|onboarding/journey-map.adoc
+
+|Understand core concepts
+|arc42/08-concepts.adoc
+
+|See antipatterns
+|llm/antipatterns.adoc
+|===
+
+---
+
+== Metrics for LLM Self-Assessment
+
+After consuming this knowledge graph, LLM should be able to:
+
+1. ✅ Explain MCP protocol in 2 sentences
+2. ✅ Name 4 layers of component architecture
+3. ✅ Implement new tool with correct schema
+4. ✅ Identify most common mistakes (3 examples)
+5. ✅ Debug issue given symptom
+6. ✅ Explain why design decision was made (reference ADR)
+
+If unable to do above → re-read relevant concepts in order of prerequisites.

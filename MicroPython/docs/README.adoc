@@ -1,0 +1,538 @@
+= K10 MCP Server - Mental Model Documentation
+:toc:
+:toc-title: Documentation Index
+
+== Welcome
+
+This documentation captures the **theory of programming** behind the K10 MCP Server - not just what the code does, but **why it exists** and **how to think about it**.
+
+[quote, Peter Naur]
+Programming as Theory Building: The real program is the theory in developers' minds, not the code itself.
+
+== Quick Start
+
+**New to this project?** Start here:
+
+1. link:arc42/01-introduction.adoc[System Vision & Goals] (15 min read)
+2. link:arc42/03-context.adoc[System Boundaries] (20 min read)  
+3. link:arc42/08-concepts.adoc[Core Concepts & Mental Models] (45 min read)
+4. link:onboarding/journey-map.adoc[4-Week Learning Journey] (if contributing)
+
+**Need to fix a bug?**
+
+1. link:onboarding/common-issues.adoc[Common Issues & Troubleshooting]
+2. link:arc42/11-risks.adoc[Known Issues & Post-Mortems]
+
+**Adding a new feature?**
+
+1. link:onboarding/development-workflow.adoc[Development Workflow]
+2. link:arc42/08-concepts.adoc#pattern-1[Pattern: Adding New Tools]
+3. link:arc42/09-decisions/README.adoc[When to Write ADRs]
+
+**Using LLM for assistance?**
+
+1. link:llm/knowledge-graph.adoc[LLM Knowledge Graph]
+2. link:llm/antipatterns.adoc[Common Antipatterns]
+
+---
+
+== Documentation Structure
+
+=== arc42 Architecture Documentation
+
+Following arc42 template for software architecture:
+
+[cols="1,3,1",options="header"]
+|===
+|Document |Content |Time
+
+|link:arc42/01-introduction.adoc[01-introduction]
+|Vision, goals, stakeholders, roadmap, constraints
+|30 min
+
+|link:arc42/03-context.adoc[03-context]
+|System boundaries, interfaces, neighbor systems
+|30 min
+
+|link:arc42/04-solution-strategy.adoc[04-solution-strategy]
+|Top 5 architecture decisions with rationale
+|45 min
+
+|link:arc42/05-building-blocks.adoc[05-building-blocks]
+|Components, layers, dependencies, code organization
+|60 min
+
+|link:arc42/08-concepts.adoc[08-concepts]
+|⭐ **Mental model map, must-understand concepts**
+|60 min
+
+|link:arc42/09-decisions/[09-decisions/]
+|Architecture Decision Records (ADRs)
+|15 min each
+
+|link:arc42/11-risks.adoc[11-risks]
+|Risks, technical debt, post-mortems, lessons learned
+|30 min
+|===
+
+---
+
+=== Onboarding Documentation
+
+For new developers joining the project:
+
+[cols="1,3,1",options="header"]
+|===
+|Document |Content |Time
+
+|link:onboarding/journey-map.adoc[journey-map]
+|4-week learning path with validation questions
+|Reference
+
+|link:onboarding/development-workflow.adoc[development-workflow]
+|Feature lifecycle, code review, testing, deployment
+|45 min
+
+|link:onboarding/common-issues.adoc[common-issues]
+|⭐ **Troubleshooting patterns: Symptom → Fix**
+|Reference
+|===
+
+---
+
+=== LLM-Specific Documentation
+
+Optimized for Large Language Model consumption:
+
+[cols="1,3,1",options="header"]
+|===
+|Document |Content |For
+
+|link:llm/knowledge-graph.adoc[knowledge-graph]
+|Structured concept hierarchy with dependencies
+|LLM navigation
+
+|link:llm/antipatterns.adoc[antipatterns]
+|❌ What NOT to do + ✅ Correct approaches
+|Code review
+
+|link:open-questions.adoc[open-questions]
+|Missing info, ambiguities, assumptions
+|Team review
+|===
+
+---
+
+== Key Concepts (Must Understand)
+
+=== 1. MCP Protocol
+
+Model Context Protocol - standardized way for AI assistants to discover and use tools.
+
+* Based on JSON-RPC 2.0
+* Tools discovered via `tools/list`
+* Executed via `tools/call`
+
+**Read:** link:arc42/08-concepts.adoc#concept-1[Concept: JSON-RPC as Universal Language]
+
+---
+
+=== 2. Stateless Tool Execution
+
+Each tool call is independent. No state between calls.
+
+* Set LED to red (absolute) ✅
+* Toggle LED (relative) ❌
+
+**Read:** link:arc42/08-concepts.adoc#concept-2[Concept: Stateless Tools]
+
+---
+
+=== 3. HTTP Transport Layer
+
+Single `/mcp` endpoint for all MCP communication.
+
+* Chose HTTP over SSE (reliability)
+* Request/response model (no streaming yet)
+* CORS-enabled for web clients
+
+**Read:** link:arc42/09-decisions/ADR-001-http-transport.adoc[ADR-001: HTTP Transport]
+
+---
+
+=== 4. Hardware Abstraction Layer (HAL)
+
+`unihiker_k10` module provides Python API for hardware.
+
+* Vendor-supplied, binary, closed-source
+* Treat as black box
+* Always wrap in try/except
+
+**Read:** link:arc42/08-concepts.adoc#concept-4[Concept: HAL as Black Box]
+
+---
+
+=== 5. Error Handling Philosophy
+
+Never crash the server. Always return valid MCP response.
+
+* Errors are data, not exceptions
+* Use `{"isError": true}` in result
+* Client sees helpful message
+
+**Read:** link:arc42/08-concepts.adoc#concept-5[Concept: Error Handling]
+
+---
+
+== Architecture Decisions
+
+Critical decisions that shaped the system:
+
+[cols="1,2,1",options="header"]
+|===
+|ADR |Decision |Status
+
+|link:arc42/09-decisions/ADR-001-http-transport.adoc[ADR-001]
+|HTTP Transport over SSE/Stdio
+|✅ Accepted
+
+|link:arc42/09-decisions/ADR-002-single-endpoint.adoc[ADR-002]
+|Single /mcp endpoint
+|✅ Accepted
+
+|ADR-003
+|Synchronous tool execution
+|✅ Accepted
+
+|ADR-004
+|In-memory session storage
+|✅ Accepted
+
+|ADR-005
+|Tool schemas in code
+|✅ Accepted
+|===
+
+**See also:** link:arc42/09-decisions/README.adoc[ADR Timeline & Evolution]
+
+---
+
+== Component Architecture
+
+```
+Claude Desktop (Client)
+    ↓ HTTP POST /mcp
+HTTP Server (Microdot)
+    ↓ parse JSON-RPC
+Protocol Handler (handle_mcp_request)
+    ↓ dispatch method
+Tool Executors (execute_tool)
+    ↓ HAL calls
+Hardware Layer (unihiker_k10)
+    ↓ I2C/SPI/GPIO
+K10 Hardware (sensors, LEDs, display)
+```
+
+**Read:** link:arc42/05-building-blocks.adoc[Building Blocks View]
+
+---
+
+== Development Workflows
+
+=== Adding a New Tool
+
+1. Design tool schema (JSON Schema)
+2. Add to `TOOLS` array
+3. Implement in `execute_tool()`
+4. Add error handling
+5. Test with curl
+6. Test with Claude Desktop
+
+**Details:** link:arc42/08-concepts.adoc#pattern-1[Pattern: Adding New Tools]
+
+---
+
+=== Debugging an Issue
+
+1. **Reproduce** with curl (isolate server from client)
+2. **Check REPL** for Python tracebacks
+3. **Add logging** to `execute_tool()`
+4. **Consult guide** link:onboarding/common-issues.adoc[Common Issues]
+
+**Details:** link:onboarding/development-workflow.adoc#debugging-workflow[Debugging Workflow]
+
+---
+
+=== Reviewing Code
+
+**Checklist:**
+
+- [ ] Functionality correct?
+- [ ] Error handling present? (try/except)
+- [ ] Schema matches implementation?
+- [ ] Memory impact <10KB?
+- [ ] Tested on hardware?
+
+**Details:** link:onboarding/development-workflow.adoc#code-review-guidelines[Review Guidelines]
+
+---
+
+== Common Pitfalls
+
+**Top 5 mistakes:**
+
+1. ❌ Not wrapping HAL in try/except → server crashes
+2. ❌ Forgetting `screen.show_draw()` → display doesn't update
+3. ❌ Testing only with Claude → can't isolate issues
+4. ❌ Loose tool schemas → Claude confusion
+5. ❌ Storing state in globals → violates stateless design
+
+**Read:** link:llm/antipatterns.adoc[Complete Antipatterns Guide]
+
+---
+
+== Troubleshooting Quick Reference
+
+[cols="2,3",options="header"]
+|===
+|Symptom |Fix
+
+|"WiFi connection failed"
+|link:onboarding/common-issues.adoc#issue-1[Issue 1: WiFi Config]
+
+|Claude can't connect
+|link:onboarding/common-issues.adoc#issue-2[Issue 2: Network/IP]
+
+|Sensor returns 0 or NaN
+|link:onboarding/common-issues.adoc#issue-4[Issue 4: Sensor Wiring]
+
+|LEDs don't light up
+|link:onboarding/common-issues.adoc#issue-5[Issue 5: Brightness]
+
+|Display not updating
+|link:onboarding/common-issues.adoc#issue-6[Issue 6: show_draw()]
+
+|Tool not discovered
+|link:onboarding/common-issues.adoc#issue-7[Issue 7: Tool Registration]
+
+|MemoryError crash
+|link:onboarding/common-issues.adoc#issue-10[Issue 10: Memory Leak]
+|===
+
+---
+
+== For Different Audiences
+
+=== Hobbyists / Makers
+
+**Start here:**
+
+1. link:../README.md[Project README] (setup instructions)
+2. link:../quickstart.md[Quick Start Guide]
+3. link:onboarding/common-issues.adoc[Troubleshooting]
+
+**Goal:** Get it working, understand enough to modify
+
+---
+
+=== Senior Developers (New Contributors)
+
+**Start here:**
+
+1. link:onboarding/journey-map.adoc[4-Week Onboarding]
+2. link:arc42/08-concepts.adoc[Core Concepts]
+3. link:arc42/09-decisions/[Architecture Decisions]
+
+**Goal:** Understand theory, contribute features
+
+---
+
+=== AI Researchers
+
+**Start here:**
+
+1. link:arc42/01-introduction.adoc[Vision & Goals]
+2. link:arc42/03-context.adoc[System Context]
+3. link:arc42/08-concepts.adoc[Mental Models]
+
+**Goal:** Understand MCP-to-embedded mapping, research opportunities
+
+---
+
+=== LLM Assistants (e.g., Claude)
+
+**Start here:**
+
+1. link:llm/knowledge-graph.adoc[Knowledge Graph] (structured concepts)
+2. link:llm/antipatterns.adoc[Antipatterns] (common mistakes)
+3. link:onboarding/common-issues.adoc[Troubleshooting] (symptom → fix)
+
+**Goal:** Efficiently navigate codebase, provide accurate assistance
+
+---
+
+== Reading Paths
+
+=== Path 1: Quick Overview (30 minutes)
+
+Perfect for: First-time visitors, stakeholders
+
+1. link:arc42/01-introduction.adoc[Introduction] (vision, goals)
+2. link:arc42/03-context.adoc[Context] (boundaries, interfaces)
+3. link:arc42/08-concepts.adoc[Core Metaphor] (first section only)
+
+**Outcome:** Understand WHAT and WHY
+
+---
+
+=== Path 2: Developer Onboarding (4 weeks)
+
+Perfect for: New contributors
+
+Follow: link:onboarding/journey-map.adoc[Journey Map]
+
+**Week 1:** Conceptual understanding
+**Week 2:** Code fundamentals
+**Week 3:** Advanced topics
+**Week 4:** Independent contribution
+
+**Outcome:** Become productive contributor
+
+---
+
+=== Path 3: Troubleshooting (15 minutes)
+
+Perfect for: Bug fixing, debugging
+
+1. link:onboarding/common-issues.adoc[Common Issues] (find your symptom)
+2. link:arc42/11-risks.adoc[Post-Mortems] (learn from past incidents)
+3. link:llm/antipatterns.adoc[Antipatterns] (avoid common mistakes)
+
+**Outcome:** Fix issue, prevent recurrence
+
+---
+
+=== Path 4: Architecture Review (2 hours)
+
+Perfect for: Technical assessment, design decisions
+
+1. link:arc42/04-solution-strategy.adoc[Solution Strategy] (top 5 decisions)
+2. link:arc42/09-decisions/README.adoc[ADR Timeline] (decision evolution)
+3. link:arc42/05-building-blocks.adoc[Building Blocks] (component structure)
+4. link:open-questions.adoc[Open Questions] (unknowns and ambiguities)
+
+**Outcome:** Understand design rationale, identify gaps
+
+---
+
+== Documentation Metrics
+
+**Coverage:**
+
+* ✅ Architecture decisions documented (5 ADRs)
+* ✅ Core concepts explained (5 critical + 5 important)
+* ✅ Troubleshooting guide (12+ issues)
+* ✅ Onboarding path defined (4-week journey)
+* ✅ Antipatterns cataloged (13 common mistakes)
+* ⚠️  Open questions tracked (20 items)
+
+**Quality Criteria:**
+
+Can a new senior developer:
+
+* ✅ Understand design decisions without asking team?
+* ✅ Know why the system is built this way?
+* ✅ Develop features consistent with architecture?
+* ✅ Recognize violations of unwritten rules?
+* ✅ Debug issues using documented patterns?
+* ✅ Avoid common pitfalls?
+
+---
+
+== Maintenance
+
+**Keeping docs current:**
+
+1. **When adding feature:**
+   - Update link:arc42/05-building-blocks.adoc[Building Blocks] if new component
+   - Add ADR if architectural decision
+   - Update tool count in link:arc42/01-introduction.adoc[Introduction]
+
+2. **When fixing bug:**
+   - Add to link:onboarding/common-issues.adoc[Common Issues] if recurring
+   - Document workaround in link:arc42/08-concepts.adoc[Concepts]
+
+3. **When changing architecture:**
+   - Write new ADR in link:arc42/09-decisions/[09-decisions/]
+   - Mark old ADR as superseded
+   - Update link:arc42/04-solution-strategy.adoc[Solution Strategy]
+
+4. **When questions answered:**
+   - Move from link:open-questions.adoc[Open Questions] to appropriate doc
+   - Update assumption validation
+
+**Review cycle:** Quarterly (or before major releases)
+
+---
+
+== Contributing to Documentation
+
+**Found a gap?**
+
+1. Add to link:open-questions.adoc[Open Questions]
+2. Mark priority (CRITICAL/HIGH/MEDIUM/LOW)
+3. Create issue on GitHub
+
+**Want to improve docs?**
+
+1. Follow arc42 structure
+2. Use AsciiDoc format
+3. Include PlantUML diagrams where helpful
+4. Test links work
+5. Submit pull request
+
+**Doc conventions:**
+
+* Use present tense ("The server handles..." not "will handle")
+* Include code examples (real, not pseudocode)
+* Link to related docs (internal cross-references)
+* Explain WHY, not just WHAT
+
+---
+
+== Credits
+
+**Documentation created by:** Claude Sonnet 4.5 (AI Assistant)
+
+**Based on prompt:** link:../.github/prompts/mental-model.prompt.md[mental-model.prompt.md]
+
+**Methodology:**
+
+* Peter Naur's "Programming as Theory Building"
+* arc42 architecture template
+* Docs-as-code (Ralf D. Müller)
+* Michael Nygard's ADR format
+
+**Project maintained by:** rdmueller
+
+**License:** MIT (same as codebase)
+
+---
+
+== Feedback
+
+**Questions? Suggestions?**
+
+* GitHub Issues: [Repository URL]
+* Discord: [Community Link]
+* Email: [Maintainer Contact]
+
+**Found this useful?** Star the repo ⭐
+
+**Found a mistake?** Open an issue or PR
+
+---
+
+_Last updated: 2024-11-20_
+
+_Next review: 2025-02-20 (quarterly)_

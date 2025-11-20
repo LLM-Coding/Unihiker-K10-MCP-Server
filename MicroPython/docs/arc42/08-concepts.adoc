@@ -1,0 +1,741 @@
+= Concepts and Cross-Cutting Concerns
+:toc:
+
+== Core Metaphor: The Hardware Translator
+
+[quote]
+Think of the K10 MCP Server as a **universal translator** between AI language (natural language + tool calls) and hardware language (I2C commands, GPIO states).
+
+*Mental model:*
+
+```
+User: "Turn left LED red"
+    ↓ (natural language)
+Claude: [Interprets intent]
+    ↓ (MCP tool call)
+K10 Server: [Translates to hardware command]
+    ↓ (I2C protocol)
+Hardware: [LED glows red]
+```
+
+**Key insight:** The server doesn't "understand" what LEDs are for. It's a pure protocol bridge:
+- **Input:** JSON-RPC method calls
+- **Output:** Hardware state changes
+
+This simplicity is its strength - no business logic, no state machine, just translation.
+
+== Must-Understand Concepts
+
+=== Concept 1: JSON-RPC as the Universal Language
+
+**What it is:**
+
+JSON-RPC 2.0 is a stateless, remote procedure call protocol. Every request has:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 123,
+  "method": "tools/call",
+  "params": {"name": "set_rgb_led", "arguments": {...}}
+}
+```
+
+**Why it matters:**
+
+* **MCP is built on JSON-RPC** - If you don't understand JSON-RPC, you don't understand MCP
+* **Tool discovery works through introspection** - Client calls `tools/list` to see what's available
+* **Errors are standardized** - Code -32601 = method not found, -32603 = internal error
+
+**Impact on development:**
+
+* Adding a new tool requires:
+  1. Schema definition (in `TOOLS` array)
+  2. Implementation (in `execute_tool()`)
+  3. That's it! Claude auto-discovers it via `tools/list`
+
+* **Common mistake newcomers make:**
+  - Trying to add REST endpoints like `/set-led?color=red`
+  - **Why wrong:** Breaks MCP discoverability, client can't introspect
+  - **Correct:** Add tool to `TOOLS`, implement in `execute_tool()`
+
+**Validation question:**
+
+> *"How does Claude know what tools are available on the K10 server?"*
+>
+> Answer: Calls `tools/list` method, receives array of tool schemas with names and input schemas.
+
+**Code locations:**
+
+* Schema: Lines 28-165 (`TOOLS` array)
+* Handling: Lines 310-315 (`tools/list` case in `handle_mcp_request()`)
+
+---
+
+=== Concept 2: Stateless Tool Execution
+
+**What it is:**
+
+Each tool call is **independent** - no state persists between calls. 
+
+*Example:*
+```python
+# Call 1: Set LED to red
+set_rgb_led(0, 255, 0, 0)
+
+# Call 2: Set LED to blue (doesn't "know" it was red)
+set_rgb_led(0, 0, 0, 255)
+```
+
+**Why it matters:**
+
+* **Simplicity:** No need for state management, locks, or cleanup
+* **Reliability:** Server crash = just restart, no corrupted state
+* **Concurrency safety:** Tools don't interfere (though executed serially)
+
+**Impact on development:**
+
+* **Cannot do:** "Toggle LED" (need to know current state)
+* **Can do:** "Set LED to red" (absolute state)
+* **Workaround:** If state needed, store in `sessions` dict
+
+**Common mistake newcomers make:**
+
+* Storing tool state in global variables:
+  ```python
+  current_led_color = (0, 0, 0)  # ❌ BAD!
+  
+  def execute_tool(name, args):
+      if name == "toggle_led":
+          current_led_color = (255, 0, 0) if current_led_color == (0, 0, 0) else (0, 0, 0)
+  ```
+* **Why wrong:** 
+  - State lost on restart
+  - Race conditions if multi-client support added
+  - Hard to debug (hidden state)
+
+* **Correct approach:**
+  ```python
+  # Make state explicit in tool arguments
+  def execute_tool(name, args):
+      if name == "set_led":
+          color = args["color"]  # Client tracks state, not server
+  ```
+
+**Validation question:**
+
+> *"What happens if the server restarts while an LED is on?"*
+>
+> Answer: LED stays in last hardware state (hardware retains state), but server forgets. Client should re-initialize if needed.
+
+**Code locations:**
+
+* Tool execution: Lines 168-280 (`execute_tool()` function)
+* Session state (only for MCP protocol): Line 25 (`sessions = {}`)
+
+---
+
+=== Concept 3: MCP Tool Schema = Contract
+
+**What it is:**
+
+The `inputSchema` in each tool defines the **contract** between client and server:
+
+```json
+{
+  "name": "set_rgb_led",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "led_num": {"type": "integer", "minimum": -1, "maximum": 2},
+      "r": {"type": "integer", "minimum": 0, "maximum": 255}
+    },
+    "required": ["r", "g", "b"]
+  }
+}
+```
+
+**Why it matters:**
+
+* **Claude auto-generates prompts** based on schema
+* **Type errors caught early** (before hardware call)
+* **Self-documenting** - No separate API docs needed
+
+**Impact on development:**
+
+* **Schema changes = breaking changes** (Claude's understanding changes)
+* **Be precise:** `"minimum": 0` prevents negative brightness
+* **Optional vs required:** Missing required field = error before execution
+
+**Common mistake newcomers make:**
+
+* Loose schema:
+  ```json
+  {"properties": {"color": {"type": "string"}}}  // ❌ Too vague!
+  ```
+* **Why wrong:** Claude doesn't know format - RGB? Hex? Name?
+* **Correct:**
+  ```json
+  {
+    "properties": {
+      "r": {"type": "integer", "minimum": 0, "maximum": 255},
+      "g": {"type": "integer", "minimum": 0, "maximum": 255},
+      "b": {"type": "integer", "minimum": 0, "maximum": 255}
+    }
+  }
+  ```
+
+**Validation question:**
+
+> *"User says 'Turn LED green'. How does Claude know to call `set_rgb_led(0, 255, 0)` and not `set_rgb_led('green')`?"*
+>
+> Answer: Tool schema specifies integer parameters (r, g, b), so Claude translates "green" → (0, 255, 0).
+
+**Code locations:**
+
+* All schemas: Lines 28-165 (`TOOLS` array)
+* Example: Lines 28-43 (`set_rgb_led` schema)
+
+---
+
+=== Concept 4: Hardware Abstraction Layer (HAL) as Black Box
+
+**What it is:**
+
+The `unihiker_k10` module is **vendor-provided, binary, closed-source**. We call it, don't modify it.
+
+```python
+from unihiker_k10 import rgb, screen, temp_humi
+# ↑ Black box - no source code available
+```
+
+**Why it matters:**
+
+* **Trust the abstraction:** If `rgb.write()` says it sets LED, assume it works
+* **No deep debugging:** Can't step into HAL code
+* **Dependency risk:** If vendor abandons it, we're stuck
+
+**Impact on development:**
+
+* **Defensive programming:** Wrap HAL calls in try/except
+* **Document behavior:** Comment what HAL functions *actually* do (not just what docs say)
+* **Plan exit strategy:** Keep HAL isolated in `execute_tool()` for easy replacement
+
+**Common mistake newcomers make:**
+
+* Trying to "fix" HAL bugs:
+  ```python
+  # ❌ Attempting to patch vendor module
+  import unihiker_k10.rgb
+  unihiker_k10.rgb.write = my_custom_write
+  ```
+* **Why wrong:** 
+  - Binary module may not allow monkey-patching
+  - Breaks on updates
+  - Hides real issue
+
+* **Correct approach:**
+  ```python
+  # ✅ Wrapper with workaround
+  def safe_rgb_write(num, r, g, b):
+      try:
+          rgb.write(num=num, R=r, G=g, B=b)
+      except OSError:
+          # Known bug: I2C timeout on fast calls
+          time.sleep(0.05)
+          rgb.write(num=num, R=r, G=g, B=b)
+  ```
+
+**Validation question:**
+
+> *"The display sometimes doesn't update. How do you debug?"*
+>
+> Answer: 
+> 1. Check SPI wiring (hardware issue)
+> 2. Add `time.sleep()` before `show_draw()` (HAL timing requirement)
+> 3. Document workaround in code comment
+> 4. Cannot debug inside `screen` module (black box)
+
+**Code locations:**
+
+* HAL imports: Lines 10-13
+* HAL usage: Throughout `execute_tool()` (lines 168-280)
+
+---
+
+=== Concept 5: Error Handling Philosophy
+
+**What it is:**
+
+**Never crash the server.** Always return a valid MCP response, even on error.
+
+```python
+try:
+    result = execute_tool(name, args)
+except Exception as e:
+    result = {
+        "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+        "isError": True  # ← MCP error flag
+    }
+```
+
+**Why it matters:**
+
+* **Robustness:** Hardware failures shouldn't kill server
+* **Debugging:** Client sees error message, can retry or report
+* **User experience:** Claude can tell user "Sensor not responding" instead of silence
+
+**Impact on development:**
+
+* **Every tool must handle exceptions**
+* **Errors are data, not control flow** (MCP has no exceptions, only error objects)
+* **Fail gracefully:** Partial success is OK (e.g., "LED 0 set, LED 1 failed")
+
+**Common mistake newcomers make:**
+
+* Letting exceptions bubble up:
+  ```python
+  def execute_tool(name, args):
+      temp = temp_humi.read_temp()  # ❌ Uncaught OSError crashes server!
+      return {"content": [...]}
+  ```
+
+* **Why wrong:** 
+  - HTTP endpoint returns 500
+  - Claude sees "Server error", no context
+  - User frustrated
+
+* **Correct approach:**
+  ```python
+  def execute_tool(name, args):
+      try:
+          temp = temp_humi.read_temp()
+          return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+      except OSError as e:
+          return {
+              "content": [{"type": "text", "text": f"Sensor error: {e}"}],
+              "isError": True
+          }
+  ```
+
+**Validation question:**
+
+> *"What happens if I2C bus is broken and sensor doesn't respond?"*
+>
+> Answer: 
+> - HAL raises `OSError`
+> - `execute_tool()` catches it
+> - Returns `{"isError": true, "content": [...]}` with error message
+> - Server stays running, Claude tells user "Sensor not responding"
+
+**Code locations:**
+
+* Master try/except: Lines 272-280 (`execute_tool()` wrapper)
+* HTTP error handling: Lines 363-377 (`mcp_endpoint()` exception handler)
+
+== Unwritten Rules (Tribal Knowledge)
+
+These are conventions **not in the code** but essential for development:
+
+[cols="1,2,2",options="header"]
+|===
+|Rule |Reasoning |Example
+
+|**Always test with curl before Claude**
+|Claude Desktop config errors are confusing; curl is direct
+|`curl -X POST http://192.168.1.100:8080/mcp -d '{"jsonrpc":"2.0",...}'`
+
+|**Display status on startup**
+|K10 has no console; screen is the "STDOUT"
+|Lines 430-434 (`screen.draw_text("MCP v0.3", ...)`)
+
+|**Session ID is optional**
+|MCP spec requires it, but we generate if missing
+|Line 356 (create session on `initialize` if no header)
+
+|**CORS must allow Mcp-Session-Id**
+|Custom header needs explicit CORS permission
+|Line 386 (`Access-Control-Allow-Headers`)
+
+|**Use led_num=-1 for "all LEDs"**
+|HAL convention, not documented in vendor docs
+|Line 171 (`led_num = arguments.get("led_num", -1)`)
+
+|**Colors are 24-bit integers**
+|`0xRRGGBB` format (e.g., `0xFF0000` = red)
+|Display tools use this (lines 224-270)
+
+|**Always call show_draw() after display ops**
+|Display has framebuffer, must flush
+|Line 222 (`screen.show_draw()`)
+|===
+
+== Failed Experiments
+
+=== Experiment 1: Server-Sent Events (SSE) Transport
+
+**What we tried:**
+
+```python
+@app.route('/sse')
+async def sse_stream(request):
+    async def event_stream():
+        yield 'data: {"method": "initialize"}\n\n'
+    return Response(event_stream(), content_type='text/event-stream')
+```
+
+**Why it didn't work:**
+
+* MicroPython SSE library buggy (dropped connections)
+* Client-side EventSource required bidirectional emulation
+* Keep-alive logic complex on embedded
+
+**Lesson learned:**
+
+* Simplicity > feature completeness on embedded
+* HTTP request/response is mature, SSE is not (in MicroPython)
+
+**When to reconsider:**
+
+* If MCP spec deprecates HTTP transport
+* If MicroPython SSE implementation improves
+
+---
+
+=== Experiment 2: External Tool Configuration (JSON file)
+
+**What we tried:**
+
+```json
+// tools.json
+[
+  {"name": "set_rgb_led", "inputSchema": {...}},
+  ...
+]
+```
+
+```python
+# Load at startup
+with open('tools.json') as f:
+    TOOLS = json.load(f)
+```
+
+**Why it didn't work:**
+
+* MicroPython SD card unreliable (file corruption)
+* Slower startup (30ms penalty)
+* Schema/code can drift (no type checking)
+
+**Lesson learned:**
+
+* Colocation of schema + code more important than flexibility
+* Embedded "best practices" differ from backend (no hot-reload needed)
+
+**When to reconsider:**
+
+* If tools become plugins (load dynamically)
+* If non-programmers need to add tools
+
+---
+
+=== Experiment 3: Async Tool Execution
+
+**What we tried:**
+
+```python
+async def execute_tool(name, args):
+    if name == "get_temperature":
+        temp = await async_read_temp()  # Hypothetical async HAL
+```
+
+**Why it didn't work:**
+
+* HAL (`unihiker_k10`) is synchronous only
+* No benefit (I2C reads fast, ~5ms)
+* Added complexity (event loop, awaits everywhere)
+
+**Lesson learned:**
+
+* Don't async-ify for the sake of it
+* Profile first: I2C bottleneck was only 5ms, not worth complexity
+
+**When to reconsider:**
+
+* If adding camera (long operations, ~500ms)
+* If WebSocket transport needs bidirectional async
+
+== Cross-Cutting Concerns
+
+=== Logging Strategy
+
+**What we do:**
+
+* Print to REPL (USB serial console)
+* Display critical errors on screen
+
+**Example:**
+```python
+print(f"MCP Request: {method}")  # REPL logging
+screen.draw_text(text="ERROR", ...)  # User-visible error
+```
+
+**Limitations:**
+
+* No log levels (everything is print)
+* No log rotation (REPL buffer limited)
+* No structured logging (no JSON)
+
+**Future:**
+
+* Send logs to syslog server (if WiFi available)
+* Store last 100 lines in RAM for `/logs` endpoint
+
+---
+
+=== Configuration Management
+
+**What we do:**
+
+* Hardcoded constants in `boot.py` (WiFi credentials)
+* No runtime config reload
+
+**Example:**
+```python
+WIFI_SSID = "Your-WiFi-Name"  # Edit before upload
+```
+
+**Limitations:**
+
+* Config change = re-upload file
+* No environment variables (not a concept on embedded)
+
+**Future:**
+
+* Config file on SD card (`config.json`)
+* Web UI for WiFi setup (captive portal)
+
+---
+
+=== Error Reporting to User
+
+**Principles:**
+
+1. **Hardware errors → Screen** (user might not have computer connected)
+2. **Protocol errors → JSON response** (Claude sees it)
+3. **Critical errors → Both** (WiFi failed → screen + HTTP 500)
+
+**Example:**
+
+```python
+# WiFi failure (boot.py)
+screen.draw_text(text="WiFi Failed!", line=5, color=0xFF0000)
+
+# Tool error (k10-mcp-server.py)
+return {"content": [{"type": "text", "text": "Sensor error"}], "isError": True}
+```
+
+---
+
+=== Testing Strategy
+
+**Unit tests:** None (MicroPython has limited unittest support)
+
+**Integration tests:** Manual + `test_k10_mcp.py` script
+
+**Testing workflow:**
+
+1. Upload code to K10
+2. Run `python test_k10_mcp.py <IP> demo` from PC
+3. Watch display and REPL for errors
+4. Test with Claude Desktop
+
+**Future:**
+
+* Mock HAL for desktop testing (run on CPython)
+* Automated test suite in CI/CD
+
+---
+
+=== Performance Optimization
+
+**Memory profiling:**
+
+```python
+import gc
+print(f"Free RAM: {gc.mem_free()} bytes")
+```
+
+**Hotspots identified:**
+
+1. **JSON parsing:** Uses ~10KB per request (acceptable)
+2. **Tool schemas:** TOOLS array = ~5KB (acceptable)
+3. **Display framebuffer:** ~20KB (vendor-managed, can't optimize)
+
+**Optimization done:**
+
+* Removed logging in hot path (saved 2KB)
+* Reused session dict instead of creating new (saved GC pressure)
+
+**Not optimized (not worth it):**
+
+* String concatenation (Python does well enough)
+* Function call overhead (negligible on fast tools)
+
+== Common Development Patterns
+
+=== Pattern 1: Adding a New Tool
+
+```python
+# Step 1: Add schema to TOOLS array
+TOOLS.append({
+    "name": "my_new_tool",
+    "description": "Does something cool",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "param": {"type": "string"}
+        },
+        "required": ["param"]
+    }
+})
+
+# Step 2: Add implementation to execute_tool()
+def execute_tool(name, arguments):
+    # ... existing tools ...
+    
+    elif name == "my_new_tool":
+        param = arguments["param"]
+        # Do something with HAL
+        result = some_hal_function(param)
+        return {"content": [{"type": "text", "text": f"Result: {result}"}]}
+```
+
+**Testing:**
+
+```bash
+curl -X POST http://192.168.1.100:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+# Verify "my_new_tool" appears in response
+
+curl -X POST http://192.168.1.100:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"my_new_tool","arguments":{"param":"test"}}}'
+```
+
+---
+
+=== Pattern 2: Debugging Hardware Issues
+
+```python
+# Add verbose logging
+def execute_tool(name, arguments):
+    if name == "problematic_tool":
+        print(f"[DEBUG] Called with args: {arguments}")
+        try:
+            result = hal.function()
+            print(f"[DEBUG] HAL returned: {result}")
+            return {"content": [{"type": "text", "text": str(result)}]}
+        except Exception as e:
+            print(f"[ERROR] HAL exception: {e}")
+            # Also show on screen
+            screen.clear()
+            screen.draw_text(text=f"ERROR: {e}", line=4, font_size=12, color=0xFF0000)
+            screen.show_draw()
+            raise
+```
+
+Watch REPL output while triggering tool from Claude.
+
+---
+
+=== Pattern 3: Handling Optional Arguments
+
+```python
+# Use .get() with defaults
+def execute_tool(name, arguments):
+    if name == "display_text":
+        text = arguments["text"]  # Required
+        x = arguments.get("x", 10)  # Optional, default 10
+        y = arguments.get("y", 10)
+        font_size = arguments.get("font_size", 16)
+        
+        # ... use values
+```
+
+**Schema must mark as optional:**
+```json
+{
+  "properties": {
+    "text": {"type": "string"},
+    "x": {"type": "integer"}  // Not in "required" = optional
+  },
+  "required": ["text"]  // Only text is required
+}
+```
+
+== Mental Model Map
+
+```
+User Intent
+    ↓
+Claude (LLM)
+    ↓
+Tool Selection (based on TOOLS schemas)
+    ↓
+JSON-RPC Request
+    ↓
+HTTP POST /mcp
+    ↓
+Microdot HTTP Server
+    ↓
+handle_mcp_request() (protocol layer)
+    ↓
+execute_tool() (tool dispatcher)
+    ↓
+HAL Call (unihiker_k10.*)
+    ↓
+Hardware (I2C/SPI/GPIO)
+    ↓
+Physical State Change (LED glows, sensor reads)
+    ↓
+MCP Response (JSON-RPC result)
+    ↓
+HTTP 200 Response
+    ↓
+Claude (interprets result)
+    ↓
+Natural Language Response
+    ↓
+User sees outcome
+```
+
+**Key decision points:**
+
+1. **Tool selection:** Claude decides based on user intent + tool descriptions
+2. **Argument mapping:** Claude translates "red" → `{"r": 255, "g": 0, "b": 0}`
+3. **Error handling:** Server catches exceptions, returns `isError: true`
+4. **Hardware timing:** HAL blocks until I2C transaction completes
+
+== What This System Is NOT
+
+[cols="1,2",options="header"]
+|===
+|Misconception |Reality
+
+|**State machine**
+|Stateless tool executor (no memory of past calls)
+
+|**IoT platform**
+|Single-device MCP server (no orchestration, no cloud)
+
+|**Production-ready**
+|Educational/proof-of-concept (no auth, no TLS)
+
+|**High-performance**
+|~30ms latency per tool call (acceptable for human interaction, not real-time control)
+
+|**General-purpose MCP server**
+|Hardware-specific (K10 board only)
+|===
+
+Understanding what the system is **NOT** helps avoid misguided feature requests.

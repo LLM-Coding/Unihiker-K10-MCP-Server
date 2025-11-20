@@ -1,0 +1,8 @@
+{
+  "asciidoc.extensions.enableKroki": true,
+  "asciidoc.preview.attributes": {
+    "kroki-fetch-diagram": "true",
+    "kroki-server-url": "https://kroki.io"
+  },
+  "asciidoc.preview.refreshInterval": 2000
+}

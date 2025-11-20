@@ -1,0 +1,269 @@
+= ADR-001: HTTP Transport Over SSE/Stdio
+
+**Status:** Accepted
+
+**Date:** 2024-11-10
+
+**Deciders:** Solo developer (Claude Sonnet AI + rdmueller validation)
+
+== Problem Statement
+
+The Model Context Protocol (MCP) specification supports three transport mechanisms:
+
+1. **stdio** - Standard input/output (process spawning)
+2. **SSE** - Server-Sent Events (HTTP long-polling)
+3. **HTTP** - Standard HTTP request/response (streamable)
+
+The K10 board runs MicroPython on an ESP32-S3 microcontroller, which has different constraints than desktop applications:
+
+* No process spawning capability (embedded system)
+* Limited HTTP library maturity in MicroPython
+* 512KB RAM constraint
+* Must work with Claude Desktop as client
+
+**Question:** Which MCP transport should we implement?
+
+== Context
+
+=== Technical Constraints
+
+* **MicroPython limitations:**
+  - No `subprocess` module (stdio requires process spawning)
+  - `asyncio` support exists but less mature than CPython
+  - SSE libraries for MicroPython are experimental
+
+* **Network environment:**
+  - K10 connects to local WiFi
+  - Claude Desktop is on same network
+  - HTTP well-supported in MicroPython (via `usocket` or `microdot`)
+
+* **Resource constraints:**
+  - Must fit in ~100KB available RAM (after OS)
+  - Simpler implementation = fewer bugs on embedded
+
+=== Requirements
+
+1. **MCP compliance:** Must follow MCP 2024-11-05 spec
+2. **Claude Desktop compatibility:** Client must work without modification
+3. **Reliability:** Connections must be stable (no random drops)
+4. **Debuggability:** Easy to test with standard tools (curl, Postman)
+
+== Decision
+
+**We will use HTTP Streamable Transport with a single `/mcp` endpoint.**
+
+=== Implementation Details
+
+* Single HTTP endpoint: `POST /mcp`
+* JSON-RPC 2.0 messages in request body
+* Session management via `Mcp-Session-Id` header
+* Standard HTTP status codes (200, 500, etc.)
+* CORS support for web-based clients
+
+=== Code Structure
+
+```python
+from microdot import Microdot
+
+app = Microdot()
+
+@app.route('/mcp', methods=['POST'])
+async def mcp_endpoint(request):
+    request_data = json.loads(request.body)
+    response_data = handle_mcp_request(request_data)
+    return Response(json.dumps(response_data), 
+                    headers={'Content-Type': 'application/json'})
+```
+
+== Consequences
+
+=== Positive
+
+✅ **Simplicity:** HTTP request/response is well-understood, mature in MicroPython
+
+✅ **Tooling:** Easy to test with `curl`, Postman, browser DevTools
+
+✅ **Debugging:** Can inspect traffic with Wireshark, proxy tools
+
+✅ **Stability:** No long-lived connections to maintain (stateless)
+
+✅ **CORS-friendly:** Standard HTTP allows cross-origin requests for web clients
+
+✅ **Memory efficient:** No connection pooling overhead, request handled and released
+
+=== Negative
+
+❌ **Latency:** Each tool call requires full HTTP round-trip (~10-20ms local network)
+
+❌ **No server push:** Cannot send sensor alerts to client (client must poll)
+
+❌ **Chattier protocol:** HTTP headers add overhead vs. stdio pipes
+
+❌ **Rate limiting harder:** No built-in backpressure (would need custom implementation)
+
+=== Neutral
+
+⚪ **Session management:** Must implement session tracking ourselves (in-memory dict)
+
+⚪ **Polling required:** For continuous sensor monitoring, client must repeatedly call tools
+
+== Alternatives Considered
+
+=== Alternative 1: stdio (Standard Input/Output)
+
+**How it works:**
+
+* MCP client spawns server as subprocess
+* Communication via stdin/stdout pipes
+* No network required
+
+**Pugh Matrix Analysis:**
+
+[cols="2,1,1,1",options="header"]
+|===
+|Criterion (Weight) |stdio (Baseline) |SSE |HTTP
+
+|**Embedded Compatibility (10)**
+|N/A (-10)
+|+0
+|+2
+
+|**Implementation Complexity (8)**
+|0
+|-1
+|+2
+
+|**MCP Compliance (10)**
+|+2
+|+2
+|+2
+
+|**Debugging/Tooling (6)**
+|0
+|+1
+|+2
+
+|**Latency (4)**
+|+2
+|-1
+|0
+
+|**Memory Overhead (7)**
+|+1
+|0
+|+1
+
+|**Stability (9)**
+|+1
+|-1
+|+2
+
+|**Weighted Score**
+|-100
+|+11
+|**+73**
+|===
+
+**Why rejected:**
+
+* **Fatal flaw:** ESP32 has no process model - cannot be "spawned" by parent process
+* Would require USB serial emulation (complex, brittle)
+* Claude Desktop expects stdio for local processes, not remote devices
+
+---
+
+=== Alternative 2: SSE (Server-Sent Events)
+
+**How it works:**
+
+* HTTP long-polling with `text/event-stream` content type
+* Server keeps connection open, pushes events
+* Client uses `EventSource` API
+
+**Implementation attempt (v0.1-0.2):**
+
+```python
+@app.route('/sse')
+async def sse_endpoint(request):
+    async def event_stream():
+        while True:
+            yield f'data: {json.dumps(event)}\n\n'
+            await asyncio.sleep(1)
+    return Response(event_stream(), content_type='text/event-stream')
+```
+
+**Why rejected:**
+
+* **Keep-alive complexity:** Must send heartbeats every 30s or connection drops
+* **Bidirectional emulation:** MCP requires request/response, SSE is uni-directional (need second HTTP channel for requests)
+* **MicroPython SSE immaturity:** Existing libraries buggy, connection drops frequent
+* **Memory leak:** Long-lived connections in MicroPython accumulate memory
+* **Debugging nightmare:** Hard to reproduce connection drops
+
+**Real-world failure (v0.2):**
+
+* Worked for ~2 minutes, then connection silently dropped
+* Claude Desktop didn't detect failure, showed "connected" but tools didn't work
+* Had to restart both client and server
+
+---
+
+=== Alternative 3: WebSocket
+
+**How it works:**
+
+* Bidirectional full-duplex connection
+* Persistent connection, low latency
+* MCP does not officially support, but could work
+
+**Why rejected:**
+
+* **Not in MCP spec:** Would require custom client (Claude Desktop wouldn't work)
+* **Larger memory footprint:** WebSocket library ~20KB
+* **Overkill for current use case:** Most tools finish in <100ms, don't need persistent connection
+
+**Future consideration:**
+
+* Revisit for v1.0+ if need bidirectional push (sensor alerts, streaming data)
+* Wait for MCP spec to add WebSocket transport
+
+== Related Decisions
+
+* link:ADR-002-single-endpoint.adoc[ADR-002: Single Endpoint Design] - Builds on HTTP choice
+* link:ADR-003-synchronous-execution.adoc[ADR-003: Synchronous Execution] - Simpler due to HTTP stateless nature
+
+== References
+
+* https://spec.modelcontextprotocol.io/specification/architecture/#transports[MCP Transport Specification]
+* https://github.com/miguelgrinberg/microdot[Microdot HTTP Framework]
+* K10 Server code: `k10-mcp-server.py` lines 338-390 (HTTP endpoint implementation)
+
+== Lessons Learned
+
+**Key insight:** On embedded systems, *boring technology wins*.
+
+* HTTP has 30 years of maturity
+* SSE is "cooler" but immature in MicroPython ecosystem
+* Simplicity reduces surface area for bugs
+
+**Quote from debugging session:**
+
+> "SSE connection dropped again. Why? No idea. HTTP request/response never has this problem." — Development log, 2024-11-12
+
+**If we could do it again:**
+
+We'd skip the SSE experiment entirely. Two weeks wasted chasing connection stability issues. HTTP was the right choice from the start, but we fell for the "SSE is more efficient" trap.
+
+**For future embedded MCP implementations:**
+
+Start with HTTP. Only consider SSE/WebSocket if:
+
+1. MicroPython support matures
+2. You need <10ms latency (we don't)
+3. You need server push (we don't, yet)
+
+== Review History
+
+* 2024-11-10: Initial decision (accepted)
+* 2024-11-12: SSE deprecated, HTTP confirmed
+* 2024-11-20: Added Pugh Matrix, formalized ADR

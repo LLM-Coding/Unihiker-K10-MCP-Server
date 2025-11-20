@@ -1,0 +1,173 @@
+= Introduction and Goals
+:toc:
+
+== System Vision and Purpose
+
+The K10 MCP Server is an **embedded Model Context Protocol (MCP) server** that runs directly on the UNIHIKER K10 development board (ESP32-S3). It enables AI assistants like Claude to control physical hardware without an intermediate gateway computer.
+
+[quote]
+*Vision:* Bridge the gap between Large Language Models and physical IoT devices by implementing a standards-based protocol directly on resource-constrained embedded hardware.
+
+=== Core Problem Solved
+
+Traditional IoT control requires:
+
+1. IoT Device ← Serial/API → Gateway Computer ← HTTP/WebSocket → AI Assistant
+
+This architecture requires:
+- Always-on gateway computer
+- Complex middleware for protocol translation
+- Network dependencies between multiple hops
+
+*Our solution:* Direct connection
+
+[source]
+----
+Claude Desktop ← HTTP/MCP → K10 Device (ESP32-S3)
+                             ├─ RGB LEDs
+                             ├─ Sensors
+                             ├─ Display
+                             └─ Camera
+----
+
+=== Why It Matters
+
+1. **Educational Value:** Demonstrates MCP protocol on embedded devices
+2. **Proof of Concept:** Shows MCP viability beyond desktop/server environments  
+3. **Lower Barrier:** No gateway computer needed - just WiFi
+4. **Real-time Control:** Direct hardware access with minimal latency
+
+== Top 3 Quality Goals
+
+[cols="1,2,2",options="header"]
+|===
+|Priority |Quality Goal |Motivation
+
+|1
+|**Resource Efficiency**
+|Must run on ESP32-S3 with 512KB RAM and MicroPython constraints. Every byte counts.
+
+|2
+|**Protocol Compliance**
+|Must implement MCP 2024-11-05 spec correctly so Claude Desktop can discover and use tools without custom clients.
+
+|3
+|**Developer Experience**
+|Setup must be simple enough for hobbyists. 3-step installation, clear errors, visible status on screen.
+|===
+
+== Stakeholders
+
+[cols="1,2,2",options="header"]
+|===
+|Stakeholder |Interest |Expectations
+
+|**Hobbyists / Makers**
+|Learn MCP + IoT integration
+|Working examples, clear documentation, low cost
+
+|**AI Researchers**
+|Explore embodied AI / LLM-to-hardware
+|Stable API, extensibility, research-friendly
+
+|**MCP Ecosystem**
+|Demonstrate protocol versatility
+|Standards compliance, showcase non-traditional use case
+
+|**Educators**
+|Teaching tool for IoT + AI concepts
+|Self-contained demos, troubleshooting guides
+
+|**Embedded Developers**
+|Reference implementation for MicroPython MCP
+|Clean code, design patterns, architecture documentation
+|===
+
+== Technical Roadmap (Next 12 Months)
+
+=== Q1 2026 (Jan-Mar)
+- [ ] **v0.4:** Add camera control tools (capture, object detection)
+- [ ] **v0.5:** Implement MCP resources (sensor data streams)
+- [ ] Performance optimization (reduce memory usage by 30%)
+
+=== Q2 2026 (Apr-Jun)
+- [ ] **v1.0:** Production-ready release
+- [ ] Support for prompts (pre-defined interaction templates)
+- [ ] WebSocket transport option (for faster bidirectional communication)
+
+=== Q3 2026 (Jul-Sep)
+- [ ] Arduino/C++ version (for ML/AI features that conflict with WiFi in MicroPython)
+- [ ] Battery/power management tools
+- [ ] Multi-board support (ESP32-C3, RP2040)
+
+=== Q4 2026 (Oct-Dec)
+- [ ] MCP sampling support (for Claude to request sensor updates)
+- [ ] Local LLM integration (edge AI)
+- [ ] Security hardening (token auth, TLS)
+
+== Deprecation Plans
+
+=== Upcoming Deprecations
+
+[cols="1,2,2,1",options="header"]
+|===
+|Feature |Reason |Alternative |Timeline
+
+|**SSE Transport**
+|Overly complex for embedded, poor error handling
+|HTTP streamable transport (already implemented)
+|Deprecated v0.3, removal v0.5
+
+|**Multi-endpoint design**
+|Fragmented routes, harder to maintain
+|Single `/mcp` endpoint handles all JSON-RPC
+|Deprecated v0.3, removal v0.5
+
+|**ujson module**
+|Name compatibility issues with newer MicroPython
+|Use `json` module directly
+|Warning v0.4, migration v0.6
+|===
+
+=== No Longer Supported
+
+* **Python 2.x syntax** (if any existed) - MicroPython 1.20+ required
+* **Port 80 HTTP** - Use 8080 (unprivileged port, no root needed)
+
+== Constraints
+
+=== Technical Constraints
+
+[cols="1,2,1",options="header"]
+|===
+|Constraint |Description |Impact
+
+|**ESP32-S3 Memory**
+|512KB RAM total, ~100KB available after OS
+|Cannot implement full MCP spec (e.g., large resource streaming)
+
+|**MicroPython Limitations**
+|No asyncio SSL, limited stdlib, slower than CPython
+|No TLS support, must implement workarounds
+
+|**WiFi vs ML Conflict**
+|MicroPython on K10 cannot use WiFi + TensorFlow simultaneously
+|Need separate Arduino implementation for AI features
+
+|**JSON-RPC Only**
+|MCP spec allows JSON-RPC; we cannot do efficient binary protocols
+|Higher bandwidth than necessary, but acceptable for low-frequency commands
+|===
+
+=== Organizational Constraints
+
+* **Solo Developer:** No dedicated team, slow feature development
+* **Hobby Project:** No SLA, no commercial support
+* **Open Source:** MIT license, community-driven priorities
+
+=== Conventions
+
+* **Language:** Python (MicroPython 1.20+)
+* **Documentation:** AsciiDoc with arc42 structure
+* **Version Format:** Semantic versioning (MAJOR.MINOR.PATCH)
+* **Code Style:** PEP 8 where possible, pragmatic on embedded

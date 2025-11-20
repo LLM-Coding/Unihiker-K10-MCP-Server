@@ -1,0 +1,271 @@
+= Architecture Decision Records - Timeline
+:toc:
+
+== Overview
+
+This directory contains Architecture Decision Records (ADRs) documenting key design decisions in the K10 MCP Server project.
+
+== ADR Format
+
+We follow Michael Nygard's ADR template with extensions:
+
+* **Status:** Proposed | Accepted | Deprecated | Superseded
+* **Date:** Decision date
+* **Context:** Problem statement and constraints
+* **Decision:** What we decided to do
+* **Consequences:** Trade-offs and implications
+* **Alternatives:** Options considered (with Pugh Matrix)
+
+== ADR Timeline
+
+=== Phase 1: Initial Architecture (Nov 2024)
+
+* link:ADR-001-http-transport.adoc[ADR-001: HTTP Transport Over SSE/Stdio] - *Accepted*
+  - **Date:** 2024-11-10
+  - **Problem:** Choose MCP transport for embedded device
+  - **Decision:** HTTP streamable transport
+  - **Impact:** Simplified implementation, no SSE complexity
+
+* link:ADR-002-single-endpoint.adoc[ADR-002: Single Endpoint Design] - *Accepted*
+  - **Date:** 2024-11-12
+  - **Problem:** Multi-route vs single endpoint for JSON-RPC
+  - **Decision:** Single `/mcp` endpoint
+  - **Impact:** Cleaner routing, easier CORS
+
+* link:ADR-003-synchronous-execution.adoc[ADR-003: Synchronous Tool Execution] - *Accepted*
+  - **Date:** 2024-11-15
+  - **Problem:** Async vs sync tool execution
+  - **Decision:** Synchronous blocking
+  - **Impact:** Simpler code, no concurrency issues
+
+=== Phase 2: State Management (Nov 2024)
+
+* link:ADR-004-session-management.adoc[ADR-004: In-Memory Session Storage] - *Accepted*
+  - **Date:** 2024-11-18
+  - **Problem:** How to store MCP sessions
+  - **Decision:** Python dict in RAM
+  - **Impact:** Simple, fast, but lost on restart
+
+* link:ADR-005-tool-schema-location.adoc[ADR-005: Tool Schema in Code] - *Accepted*
+  - **Date:** 2024-11-20
+  - **Problem:** External config vs inline schemas
+  - **Decision:** Hardcode in Python
+  - **Impact:** Colocation benefit, no hot-reload
+
+=== Future Decisions (Proposed)
+
+* **ADR-006: WebSocket Transport** - *Proposed*
+  - For bidirectional communication (v1.0+)
+
+* **ADR-007: Security Model** - *Proposed*
+  - API key authentication (v1.0+)
+
+* **ADR-008: Camera Integration** - *Proposed*
+  - Arduino version for ML features
+
+== Decision Evolution Map
+
+[plantuml, decision-map, svg]
+----
+@startuml
+!include <C4/C4_Context>
+
+Component(adr001, "ADR-001\nHTTP Transport", "Accepted")
+Component(adr002, "ADR-002\nSingle Endpoint", "Accepted")
+Component(adr003, "ADR-003\nSync Execution", "Accepted")
+Component(adr004, "ADR-004\nIn-Memory Sessions", "Accepted")
+Component(adr005, "ADR-005\nSchema in Code", "Accepted")
+
+Component(adr006, "ADR-006\nWebSocket", "Proposed")
+Component(adr007, "ADR-007\nSecurity", "Proposed")
+
+adr001 -down-> adr002 : "Enables"
+adr002 -down-> adr003 : "Simplifies"
+adr003 -down-> adr004 : "Makes feasible"
+adr001 -down-> adr005 : "Co-decision"
+
+adr001 -[dashed]-> adr006 : "May supersede"
+adr004 -[dashed]-> adr007 : "Needs enhancement"
+
+note right of adr006
+  Future: Bidirectional
+  Depends on MicroPython
+  WebSocket maturity
+end note
+
+note right of adr007
+  Future: Production readiness
+  Requires authentication
+end note
+
+@enduml
+----
+
+== Key Decision Phases
+
+=== Phase 1: Core Architecture (Weeks 1-2)
+
+*Goal:* Get basic MCP server running
+
+*Decisions made:*
+
+- Transport mechanism (ADR-001)
+- Endpoint design (ADR-002)
+- Execution model (ADR-003)
+
+*Outcome:* v0.1 proof-of-concept working
+
+---
+
+=== Phase 2: Refinement (Weeks 3-4)
+
+*Goal:* Improve robustness and maintainability
+
+*Decisions made:*
+
+- Session handling (ADR-004)
+- Schema management (ADR-005)
+
+*Outcome:* v0.3 stable release
+
+---
+
+=== Phase 3: Productionization (Future)
+
+*Goal:* Make production-ready
+
+*Planned decisions:*
+
+- Security model (ADR-007)
+- Advanced transport (ADR-006)
+- Multi-device support
+
+*Target:* v1.0 release
+
+== How to Use These ADRs
+
+**When starting development:**
+
+1. Read ADRs in chronological order (001 → 005)
+2. Understand *why* decisions were made
+3. Note alternatives considered (learn from failures)
+
+**When proposing changes:**
+
+1. Check if ADR exists for that decision
+2. If superseding, mark old ADR as "Superseded by ADR-XXX"
+3. Write new ADR explaining change rationale
+
+**When debugging:**
+
+1. Check related ADRs for context
+2. "Consequences" section often explains quirks
+
+== ADR Statistics
+
+[cols="1,1,2",options="header"]
+|===
+|Status |Count |ADRs
+
+|Accepted
+|5
+|001, 002, 003, 004, 005
+
+|Proposed
+|3
+|006, 007, 008
+
+|Deprecated
+|0
+|—
+
+|Superseded
+|0
+|—
+|===
+
+== Template for New ADRs
+
+When creating a new ADR, copy this template:
+
+```asciidoc
+= ADR-XXX: [Title]
+
+Status: Proposed / Accepted / Deprecated / Superseded
+
+Date: YYYY-MM-DD
+
+== Problem Statement
+
+What issue are we solving?
+
+== Context
+
+- Constraints
+- Requirements
+- Assumptions
+
+== Decision
+
+What we decided to do (be specific)
+
+== Consequences
+
+=== Positive
+
+* ...
+
+=== Negative
+
+* ...
+
+=== Neutral
+
+* ...
+
+== Alternatives Considered
+
+=== Alternative 1: [Name]
+
+Description...
+
+*Why rejected:* ...
+
+=== Alternative 2: [Name]
+
+Description...
+
+*Why rejected:* ...
+
+== Pugh Matrix
+
+[cols="2,1,1,1",options="header"]
+|===
+|Criterion (Weight) |Baseline |Alt 1 |Alt 2
+
+|[Criterion 1] (X)
+|0
+|±2
+|±2
+
+|[Criterion 2] (Y)
+|0
+|±2
+|±2
+
+|**Weighted Score**
+|**0**
+|**X**
+|**Y**
+|===
+
+Scale: -2 (much worse) to +2 (much better)
+
+== Related Decisions
+
+* link:ADR-YYY-xxx.adoc[ADR-YYY: ...]
+
+== References
+
+* Links to docs, discussions, etc.
+```

@@ -1,0 +1,715 @@
+= Common Issues and Troubleshooting
+:toc:
+
+== Pattern Format
+
+Each issue follows:
+
+**Symptom** → **Common Cause** → **Debugging Steps** → **Prevention**
+
+---
+
+== Network & Connectivity
+
+=== Issue 1: "WiFi connection failed" on startup
+
+**Symptom:**
+
+K10 display shows:
+```
+WiFi
+Failed!
+Check SSID
+```
+
+**Common Causes:**
+
+1. Wrong SSID or password in `boot.py`
+2. WiFi router off or out of range
+3. 5GHz network (K10 only supports 2.4GHz)
+4. Special characters in password not escaped
+
+**Debugging Steps:**
+
+```python
+# In REPL (Thonny)
+from unihiker_k10 import wifi
+
+# Test connection manually
+wifi.connect(ssid='YourNetwork', psd='YourPassword', timeout=50000)
+time.sleep(10)
+
+if wifi.status():
+    print("✅ Connected:", wifi.info())
+else:
+    print("❌ Failed")
+    # Try again with verbose errors
+```
+
+**Check:**
+
+1. SSID spelling (case-sensitive!)
+2. Password correct (no quotes in boot.py)
+3. Router on same frequency (2.4GHz)
+4. K10 in range (test with phone)
+
+**Prevention:**
+
+- Use simple password (no special chars) for testing
+- Test WiFi credentials in REPL before writing to boot.py
+- Add timeout handling in boot.py
+
+**Code fix:**
+
+```python
+# boot.py - Improved error handling
+try:
+    wifi.connect(ssid=WIFI_SSID, psd=WIFI_PASSWORD, timeout=50000)
+    time.sleep(5)
+    if not wifi.status():
+        screen.draw_text(text="WiFi timeout", line=5, color=0xFF0000)
+except Exception as e:
+    screen.draw_text(text=f"WiFi error: {e}", line=5, color=0xFF0000)
+```
+
+---
+
+=== Issue 2: Claude Desktop can't connect to K10
+
+**Symptom:**
+
+Claude says "MCP server not responding" or tools don't appear
+
+**Common Causes:**
+
+1. Wrong IP address in `claude_desktop_config.json`
+2. K10 and laptop on different networks (e.g., guest WiFi)
+3. Firewall blocking port 8080
+4. Server crashed (K10 display blank)
+
+**Debugging Steps:**
+
+```bash
+# 1. Verify K10 IP
+# Check K10 display on startup, or in REPL:
+from unihiker_k10 import wifi
+print(wifi.info())  # "192.168.1.100, ..."
+
+# 2. Test HTTP connectivity from laptop
+curl http://192.168.1.100:8080/
+# Should return: {"server":"k10-mcp-server", ...}
+
+# 3. Test MCP endpoint
+curl -X POST http://192.168.1.100:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
+
+# 4. Check Claude Desktop config
+cat ~/Library/Application\ Support/Claude/claude_desktop_config.json
+# Verify IP matches K10
+```
+
+**Prevention:**
+
+- Use static IP for K10 (router DHCP reservation)
+- Add IP check in startup display
+- Restart Claude Desktop after config change
+
+---
+
+=== Issue 3: Connection works, then stops after 2 minutes
+
+**Symptom:**
+
+Tools work initially, then Claude shows "Server error" after ~2 minutes
+
+**Common Cause:**
+
+WiFi power saving mode (K10 goes to sleep)
+
+**Debugging Steps:**
+
+```python
+# In REPL, check WiFi status periodically
+import time
+from unihiker_k10 import wifi
+
+for i in range(10):
+    print(f"[{i}] WiFi status: {wifi.status()}")
+    time.sleep(30)
+```
+
+**Prevention:**
+
+```python
+# Add keep-alive in boot.py
+from unihiker_k10 import wifi
+
+def keep_wifi_alive():
+    """Ping router every 60 seconds to prevent sleep"""
+    import socket
+    import time
+    while True:
+        try:
+            s = socket.socket()
+            s.connect(('192.168.1.1', 80))  # Router IP
+            s.close()
+        except:
+            pass
+        time.sleep(60)
+
+# Run in background (if asyncio available)
+```
+
+---
+
+== Hardware Issues
+
+=== Issue 4: Sensor returns 0 or NaN
+
+**Symptom:**
+
+`get_temperature` returns `0.0` or `nan`
+
+**Common Causes:**
+
+1. Sensor not initialized
+2. I2C wiring loose
+3. Sensor powered off
+4. Wrong I2C address
+
+**Debugging Steps:**
+
+```python
+# In REPL
+from unihiker_k10 import temp_humi
+
+# Test sensor directly
+try:
+    temp = temp_humi.read_temp()
+    print(f"Temperature: {temp}")
+    
+    humi = temp_humi.read_humi()
+    print(f"Humidity: {humi}")
+except Exception as e:
+    print(f"Error: {e}")
+```
+
+**Check:**
+
+1. Sensor connected to correct pins
+2. No loose wires (wiggle test)
+3. Sensor datasheet for I2C address
+
+**Prevention:**
+
+```python
+# Add validation in execute_tool()
+def execute_tool(name, arguments):
+    if name == "get_temperature":
+        try:
+            temp = temp_humi.read_temp()
+            
+            # Validate reading
+            if temp == 0.0 or temp != temp:  # NaN check
+                return {
+                    "content": [{"type": "text", "text": "Sensor error: invalid reading"}],
+                    "isError": True
+                }
+            
+            return {"content": [{"type": "text", "text": f"{temp}°C"}]}
+        except OSError:
+            return {
+                "content": [{"type": "text", "text": "Sensor not responding (check wiring)"}],
+                "isError": True
+            }
+```
+
+---
+
+=== Issue 5: LEDs don't light up
+
+**Symptom:**
+
+`set_rgb_led` returns success, but LEDs stay dark
+
+**Common Causes:**
+
+1. Brightness set to 0
+2. Wrong LED number (0, 1, 2, or -1 for all)
+3. LED driver not initialized
+4. Power issue
+
+**Debugging Steps:**
+
+```python
+# In REPL
+from unihiker_k10 import rgb
+
+# Initialize
+rgb.brightness(5)  # 0-9, default sometimes 0
+
+# Test each LED
+rgb.write(num=0, R=255, G=0, B=0)  # Left LED red
+time.sleep(1)
+rgb.write(num=1, R=0, G=255, B=0)  # Middle LED green
+time.sleep(1)
+rgb.write(num=2, R=0, G=0, B=255)  # Right LED blue
+time.sleep(1)
+
+# Test all
+rgb.write(num=-1, R=255, G=255, B=255)  # All white
+```
+
+**Prevention:**
+
+```python
+# In k10-mcp-server.py startup
+rgb.brightness(5)  # Set default brightness
+```
+
+---
+
+=== Issue 6: Display not updating
+
+**Symptom:**
+
+`display_text` returns success, but nothing appears on screen
+
+**Common Cause:**
+
+Forgot to call `screen.show_draw()` (framebuffer not flushed)
+
+**Debugging Steps:**
+
+```python
+# In REPL
+from unihiker_k10 import screen
+
+screen.init(dir=2)
+screen.clear()
+screen.draw_text(text="Test", line=4, font_size=20, color=0xFFFFFF)
+# Nothing visible yet!
+
+screen.show_draw()  # ← This actually updates display
+```
+
+**Prevention:**
+
+```python
+# Always call show_draw() after display operations
+def execute_tool(name, arguments):
+    if name == "display_text":
+        # ... draw operations ...
+        screen.show_draw()  # ← CRITICAL
+        return {"content": [...]}
+```
+
+---
+
+== Protocol & MCP Issues
+
+=== Issue 7: Tool not discovered by Claude
+
+**Symptom:**
+
+Claude says "I don't have a tool for that" even though tool exists in `TOOLS`
+
+**Common Causes:**
+
+1. Tool not added to `TOOLS` array
+2. Schema syntax error (invalid JSON)
+3. Server didn't restart after code change
+4. Claude Desktop cached old tool list
+
+**Debugging Steps:**
+
+```bash
+# 1. Verify tool in list
+curl -X POST http://192.168.1.100:8080/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
+
+# Should show your tool name
+
+# 2. Restart K10 server (press reset button)
+
+# 3. Restart Claude Desktop (quit completely, reopen)
+
+# 4. Test tool directly
+curl -X POST http://192.168.1.100:8080/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"YOUR_TOOL","arguments":{}}}' | jq
+```
+
+**Prevention:**
+
+- Validate JSON schema with linter before upload
+- Always restart server after code changes
+- Test with curl before testing with Claude
+
+---
+
+=== Issue 8: "Method not found" error
+
+**Symptom:**
+
+```json
+{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found: tools/execute"}}
+```
+
+**Common Cause:**
+
+Wrong method name (should be `tools/call`, not `tools/execute`)
+
+**MCP Standard Methods:**
+
+- `initialize` (handshake)
+- `tools/list` (discover tools)
+- `tools/call` (execute tool)
+
+**Debugging Steps:**
+
+Check request:
+```bash
+# Correct
+curl ... -d '{"method":"tools/call", ...}'
+
+# Wrong
+curl ... -d '{"method":"tools/execute", ...}'
+```
+
+**Prevention:**
+
+Use constants:
+```python
+VALID_METHODS = ["initialize", "tools/list", "tools/call"]
+
+def handle_mcp_request(request_data):
+    method = request_data.get("method")
+    if method not in VALID_METHODS:
+        return {"error": {"code": -32601, "message": f"Method not found: {method}"}}
+```
+
+---
+
+=== Issue 9: Tool arguments ignored
+
+**Symptom:**
+
+Claude calls tool but arguments don't affect behavior (e.g., LED always red regardless of color argument)
+
+**Common Cause:**
+
+Implementation uses hardcoded values instead of `arguments` parameter
+
+**Example Bug:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "set_rgb_led":
+        r = 255  # ❌ Hardcoded! Should be arguments["r"]
+        g = 0
+        b = 0
+        rgb.write(num=-1, R=r, G=g, B=b)
+```
+
+**Correct:**
+
+```python
+def execute_tool(name, arguments):
+    if name == "set_rgb_led":
+        r = arguments["r"]  # ✅ Use argument
+        g = arguments["g"]
+        b = arguments["b"]
+        rgb.write(num=-1, R=r, G=g, B=b)
+```
+
+**Debugging:**
+
+```python
+# Add logging
+def execute_tool(name, arguments):
+    print(f"[DEBUG] Tool: {name}, Args: {arguments}")  # ← Check in REPL
+    # ...
+```
+
+---
+
+== Memory Issues
+
+=== Issue 10: MemoryError after running for hours
+
+**Symptom:**
+
+```
+Traceback (most recent call last):
+  ...
+MemoryError: memory allocation failed, allocating 1024 bytes
+```
+
+**Common Causes:**
+
+1. Session dict growing unbounded
+2. Circular references not garbage collected
+3. Large string concatenations
+4. Memory fragmentation
+
+**Debugging Steps:**
+
+```python
+# In REPL
+import gc
+
+# Check free memory
+print(f"Free: {gc.mem_free()} bytes")
+print(f"Allocated: {gc.mem_alloc()} bytes")
+
+# Force garbage collection
+gc.collect()
+print(f"After GC: {gc.mem_free()} bytes")
+
+# Profile specific operation
+before = gc.mem_free()
+# ... trigger tool via curl ...
+after = gc.mem_free()
+print(f"Tool used: {before - after} bytes")
+```
+
+**Prevention:**
+
+```python
+# Add periodic cleanup
+import gc
+import time
+
+last_gc = time.time()
+
+@app.route('/mcp', methods=['POST'])
+async def mcp_endpoint(request):
+    global last_gc
+    
+    # Garbage collect every 60 seconds
+    if time.time() - last_gc > 60:
+        gc.collect()
+        last_gc = time.time()
+        print(f"[GC] Free memory: {gc.mem_free()}")
+    
+    # ... rest of handler ...
+```
+
+---
+
+=== Issue 11: "ESP32: CrashLog" and reboot loop
+
+**Symptom:**
+
+K10 continuously reboots, REPL shows:
+```
+ESP32: CrashLog
+...
+Exception (3): epc1=...
+```
+
+**Common Causes:**
+
+1. Stack overflow (recursion too deep)
+2. Null pointer dereference (in HAL)
+3. Watchdog timeout (blocking operation >10s)
+
+**Debugging Steps:**
+
+1. **Find last successful operation:**
+   - Add print statement before each HAL call
+   - Check REPL to see which one crashes
+
+2. **Simplify code:**
+   - Comment out tool implementations one by one
+   - Find which tool causes crash
+
+3. **Check for blocking operations:**
+   ```python
+   import time
+   start = time.time()
+   # ... tool operation ...
+   duration = time.time() - start
+   print(f"Tool took {duration}s")  # Should be <1s
+   ```
+
+**Prevention:**
+
+```python
+# Add watchdog feed for long operations
+from machine import WDT
+
+wdt = WDT(timeout=10000)  # 10 second timeout
+
+def long_operation():
+    for i in range(100):
+        # ... work ...
+        wdt.feed()  # Reset watchdog
+```
+
+---
+
+== Display Issues
+
+=== Issue 12: Display shows garbled text
+
+**Symptom:**
+
+Characters appear as random symbols or boxes
+
+**Common Causes:**
+
+1. Font size too large for screen
+2. Coordinates off-screen
+3. Text encoding issue (non-ASCII)
+4. Display not initialized
+
+**Debugging Steps:**
+
+```python
+# In REPL
+from unihiker_k10 import screen
+
+screen.init(dir=2)  # Always init first
+screen.clear()
+
+# Test simple ASCII
+screen.draw_text(text="ABC", x=10, y=10, font_size=20, color=0xFFFFFF)
+screen.show_draw()
+
+# If works, try problematic text
+screen.clear()
+screen.draw_text(text="Your text here", x=10, y=10, font_size=20, color=0xFFFFFF)
+screen.show_draw()
+```
+
+**Prevention:**
+
+```python
+# Validate text in tool
+def execute_tool(name, arguments):
+    if name == "display_text":
+        text = arguments["text"]
+        
+        # Limit length (display width ~30 chars)
+        if len(text) > 30:
+            text = text[:27] + "..."
+        
+        # Remove non-ASCII (if unsupported)
+        text = text.encode('ascii', errors='ignore').decode('ascii')
+        
+        screen.draw_text(text=text, ...)
+```
+
+---
+
+== Error Code Reference
+
+=== JSON-RPC Error Codes
+
+[cols="1,2,2",options="header"]
+|===
+|Code |Meaning |Common Fix
+
+|`-32700`
+|Parse error (invalid JSON)
+|Check JSON syntax in request
+
+|`-32600`
+|Invalid Request (missing jsonrpc field)
+|Add `"jsonrpc": "2.0"`
+
+|`-32601`
+|Method not found
+|Use `tools/call` not `tools/execute`
+
+|`-32602`
+|Invalid params
+|Check tool argument schema
+
+|`-32603`
+|Internal error (exception in handler)
+|Check REPL for Python traceback
+|===
+
+---
+
+=== HAL Error Codes (OSError)
+
+[cols="1,2,2",options="header"]
+|===
+|Errno |Meaning |Common Fix
+
+|`110 ETIMEDOUT`
+|I2C timeout
+|Check sensor wiring, add retry
+
+|`5 EIO`
+|I/O error (hardware not responding)
+|Power cycle device, check connections
+
+|`12 ENOMEM`
+|Out of memory
+|Reduce allocations, call `gc.collect()`
+
+|`103 ECONNABORTED`
+|Connection aborted (WiFi dropped)
+|Reconnect WiFi, check signal strength
+|===
+
+---
+
+== Quick Diagnostic Commands
+
+**Copy-paste these into REPL for fast debugging:**
+
+```python
+# === System Info ===
+import gc, sys
+print(f"MicroPython: {sys.version}")
+print(f"Free RAM: {gc.mem_free()} bytes")
+
+# === WiFi Status ===
+from unihiker_k10 import wifi
+print(f"WiFi: {wifi.status()}")
+if wifi.status():
+    print(f"IP: {wifi.info()}")
+
+# === Test All Sensors ===
+from unihiker_k10 import temp_humi, light, acce
+
+try:
+    print(f"Temp: {temp_humi.read_temp()}°C")
+    print(f"Humidity: {temp_humi.read_humi()}%")
+    print(f"Light: {light.read()}")
+    print(f"Accel: {acce.read_x()}, {acce.read_y()}, {acce.read_z()}")
+    print("✅ All sensors OK")
+except Exception as e:
+    print(f"❌ Sensor error: {e}")
+
+# === Test LEDs ===
+from unihiker_k10 import rgb
+rgb.brightness(5)
+rgb.write(num=-1, R=255, G=0, B=0)  # All red
+print("LEDs should be red")
+
+# === Test Display ===
+from unihiker_k10 import screen
+screen.clear()
+screen.draw_text(text="Test", line=4, font_size=20, color=0xFFFFFF)
+screen.show_draw()
+print("Display should show 'Test'")
+```
+
+---
+
+## Getting Help
+
+If issue not listed here:
+
+1. **Check REPL:** Python traceback often explains issue
+2. **Search ADRs:** link:../arc42/09-decisions/[Decision history] might explain "weird" behavior
+3. **Check post-mortems:** link:../arc42/11-risks.adoc[Known incidents] and fixes
+4. **Ask in Discord/Forum:** Provide REPL output + curl test
+5. **File issue on GitHub:** Include minimal reproduction steps

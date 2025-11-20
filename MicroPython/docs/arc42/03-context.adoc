@@ -1,0 +1,405 @@
+= System Context and Interfaces
+:toc:
+
+:kroki-server-url: https://kroki.io
+:kroki-fetch-diagram: true
+
+[plantuml]
+----
+a->b
+----
+
+== System Boundary
+
+=== What's INSIDE the K10 MCP Server
+
+The system consists of code running **directly on the ESP32-S3 microcontroller** inside the UNIHIKER K10 board:
+
+* MicroPython runtime
+* MCP JSON-RPC protocol handler
+* HTTP server (Microdot framework)
+* Hardware abstraction layer (`unihiker_k10` module)
+* Tool implementations (RGB, sensors, display)
+
+[plantuml, system-boundary, svg]
+----
+@startuml
+!include <C4/C4_Container>
+
+System_Boundary(k10, "K10 MCP Server (ESP32-S3)") {
+    Container(server, "HTTP Server", "Microdot", "Handles MCP requests")
+    Container(protocol, "MCP Handler", "Python", "JSON-RPC processing")
+    Container(tools, "Tool Executors", "Python", "Hardware control")
+    ContainerDb(hal, "HAL", "unihiker_k10", "Hardware drivers")
+}
+
+Person(claude, "Claude Desktop", "AI Assistant")
+System_Ext(hardware, "K10 Hardware", "Sensors, LEDs, Display")
+
+Rel(claude, server, "HTTP POST", "MCP JSON-RPC")
+Rel(server, protocol, "Parse request")
+Rel(protocol, tools, "Execute tool")
+Rel(tools, hal, "Control hardware")
+Rel(hal, hardware, "I2C, GPIO, SPI")
+
+@enduml
+----
+
+=== What's OUTSIDE (External Systems)
+
+[cols="1,2,2",options="header"]
+|===
+|System |Relationship |Interface
+
+|**Claude Desktop**
+|Client consuming MCP
+|HTTP POST to `/mcp` endpoint, JSON-RPC 2.0
+
+|**WiFi Network**
+|Communication medium
+|802.11 b/g/n, DHCP for IP assignment
+
+|**K10 Hardware**
+|Controlled peripherals
+|I2C (sensors), GPIO (LEDs/buttons), SPI (display)
+
+|**Development Machine**
+|Code upload & debugging
+|USB Serial (Thonny IDE), REPL
+
+|**Web Browser** (optional)
+|Health check, debugging
+|HTTP GET to `/` endpoint
+|===
+
+== Context Diagram
+
+[plantuml, context-diagram, svg]
+----
+@startuml
+!include <C4/C4_Context>
+
+Person(user, "User", "Developer/Hobbyist")
+System(claude, "Claude Desktop", "AI Assistant with MCP client")
+System(k10, "K10 MCP Server", "Embedded MCP server on ESP32-S3")
+System_Ext(wifi, "WiFi Network", "Local network")
+System_Ext(ide, "Thonny IDE", "Development tool")
+
+Rel(user, claude, "Asks to control hardware")
+Rel(claude, k10, "MCP commands (HTTP)", "JSON-RPC")
+Rel(k10, wifi, "Network access")
+Rel(ide, k10, "Upload code", "USB Serial")
+Rel(user, ide, "Develops code")
+
+@enduml
+----
+
+== External Interfaces
+
+=== 1. MCP Client Interface (Claude Desktop)
+
+**Type:** Inbound HTTP REST API
+
+**Endpoint:** `POST http://<K10_IP>:8080/mcp`
+
+**Protocol:** 
+- Transport: HTTP/1.1 (no TLS due to MicroPython limitations)
+- Message format: JSON-RPC 2.0
+- Session management: `Mcp-Session-Id` header
+
+**Supported MCP Methods:**
+[cols="1,2,1",options="header"]
+|===
+|Method |Purpose |Direction
+
+|`initialize`
+|Handshake, negotiate capabilities
+|Client → Server
+
+|`tools/list`
+|Discover available tools
+|Client → Server
+
+|`tools/call`
+|Execute a tool (e.g., set LED, read sensor)
+|Client → Server
+|===
+
+**Example Request:**
+[source,json]
+----
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "set_rgb_led",
+    "arguments": {
+      "led_num": 0,
+      "r": 255,
+      "g": 0,
+      "b": 0
+    }
+  }
+}
+----
+
+**Example Response:**
+[source,json]
+----
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "LED 0 set to RGB(255, 0, 0)"
+      }
+    ]
+  }
+}
+----
+
+=== 2. Health Check Interface
+
+**Type:** Inbound HTTP REST API
+
+**Endpoint:** `GET http://<K10_IP>:8080/`
+
+**Purpose:** Verify server is running, get version info
+
+**Response:**
+[source,json]
+----
+{
+  "server": "k10-mcp-server",
+  "version": "0.3.0",
+  "transport": "streamable-http",
+  "status": "running",
+  "mcp_version": "2024-11-05",
+  "endpoint": "/mcp"
+}
+----
+
+=== 3. Hardware Interface (K10 Board)
+
+**Type:** Outbound hardware control
+
+**Communication:** Through `unihiker_k10` Python module
+
+**Components:**
+
+[cols="1,2,2",options="header"]
+|===
+|Hardware |Purpose |Control Method
+
+|**RGB LEDs (3x)**
+|Visual feedback, status indication
+|`rgb.write(num, R, G, B)`
+
+|**Temperature/Humidity Sensor**
+|Environmental monitoring
+|`temp_humi.read_temp()`, `read_humi()`
+
+|**Light Sensor**
+|Ambient light detection
+|`light.read()` → 0-4095
+
+|**Accelerometer**
+|Motion detection, orientation
+|`acce.read_x/y/z()` → g-force
+
+|**2.8" TFT Display**
+|Text, graphics, status display
+|`screen.draw_text()`, `draw_rect()`, etc.
+
+|**Buttons (A, B)**
+|User input (not yet implemented in MCP)
+|`button.read('a')` → bool
+
+|**Microphone**
+|Audio input (future feature)
+|`mic.start()`
+
+|**Speaker**
+|Audio output (future feature)
+|`speaker.play_sound()`
+|===
+
+=== 4. WiFi Interface
+
+**Type:** Outbound network communication
+
+**Purpose:** Connect to local network for MCP access
+
+**Configuration:** Set in `boot.py`
+
+[source,python]
+----
+wifi.connect(ssid='NETWORK_NAME', psd='PASSWORD', timeout=50000)
+----
+
+**Status Check:**
+[source,python]
+----
+if wifi.status():
+    info = wifi.info()  # Returns: "IP, subnet, gateway, DNS"
+----
+
+== Neighbor Systems and Rationale
+
+=== Claude Desktop
+
+**Relationship:** Primary client
+
+**Rationale:** 
+- MCP native support (no custom client needed)
+- Natural language interface to hardware
+- Demonstrates AI-to-embedded integration
+
+**Interface Design Choice:**
+- HTTP instead of stdio/SSE because embedded devices lack stdin/stdout process model
+- JSON-RPC for standardization and tool discoverability
+
+=== Thonny IDE
+
+**Relationship:** Development tool
+
+**Rationale:**
+- Popular in MicroPython community
+- Simple USB serial connection
+- REPL access for debugging
+
+**Alternative Considered:** VS Code with Pymakr extension
+- Rejected: More complex setup for beginners
+
+=== Microdot Framework
+
+**Relationship:** Embedded dependency
+
+**Rationale:**
+- Lightweight HTTP server for MicroPython (~10KB)
+- Async support (needed for future WebSocket transport)
+- Maintained and well-documented
+
+**Alternative Considered:** Native socket programming
+- Rejected: Too low-level, error-prone, reinventing wheel
+
+=== unihiker_k10 Module
+
+**Relationship:** Hardware abstraction layer
+
+**Rationale:**
+- Vendor-provided, knows hardware specifics
+- Stable API, tested by manufacturer
+- Saves development time vs. raw driver code
+
+**Risk:** Proprietary, not open source
+- Mitigation: Document all HAL calls in code comments
+- Future: Could create open-source alternative
+
+== Data Flow: Typical MCP Tool Call
+
+[plantuml, dataflow, svg]
+----
+@startuml
+actor User
+participant "Claude Desktop" as Claude
+participant "K10 HTTP Server" as Server
+participant "MCP Handler" as MCP
+participant "Tool Executor" as Tool
+participant "HAL" as HAL
+participant "K10 Hardware" as HW
+
+User -> Claude: "Turn left LED red"
+Claude -> Claude: Parse intent\n→ set_rgb_led(0, 255, 0, 0)
+Claude -> Server: POST /mcp\nJSON-RPC request
+Server -> MCP: parse_request()
+MCP -> MCP: Validate method & params
+MCP -> Tool: execute_tool("set_rgb_led", {...})
+Tool -> HAL: rgb.write(num=0, R=255, G=0, B=0)
+HAL -> HW: I2C command to LED driver
+HW --> HAL: ACK
+HAL --> Tool: Success
+Tool --> MCP: {"content": [{"type": "text", "text": "LED 0 set..."}]}
+MCP --> Server: JSON-RPC response
+Server --> Claude: HTTP 200 + JSON
+Claude --> User: "I've turned the left LED red"
+@enduml
+----
+
+== Network Topology
+
+[plantuml, network-topology, svg]
+----
+@startuml
+nwdiag {
+  network Local_WiFi {
+    address = "192.168.1.x/24"
+    
+    router [address = ".1"];
+    laptop [address = ".50", description = "Claude Desktop"];
+    k10 [address = ".100", description = "K10 MCP Server"];
+  }
+  
+  network Internet {
+    router;
+    anthropic [address = "cloud", description = "Anthropic API"];
+  }
+  
+  laptop -- anthropic [label = "Claude API\n(LLM inference)"];
+  laptop -- k10 [label = "MCP HTTP\n(tool execution)"];
+}
+@enduml
+----
+
+**Key Points:**
+
+1. Claude Desktop talks to **both** Anthropic's API (for LLM) and K10 (for tools)
+2. K10 only needs local network access (no internet required for MCP)
+3. Router provides DHCP, K10 discovers its own IP via `wifi.info()`
+
+== Security Boundaries
+
+[WARNING]
+====
+**No Authentication/Authorization:** Current implementation has NO security.
+
+Anyone on the network can:
+- Control hardware
+- Read sensor data
+- Execute any tool
+====
+
+**Threat Model:**
+
+[cols="1,2,1,1",options="header"]
+|===
+|Threat |Impact |Likelihood |Current Mitigation
+
+|**Unauthorized Access**
+|Attacker controls hardware
+|HIGH (if on same WiFi)
+|NONE - trusted network assumed
+
+|**DoS Attack**
+|Server crashes, hardware unresponsive
+|MEDIUM
+|NONE - no rate limiting
+
+|**MitM Attack**
+|Command interception/modification
+|LOW (local network)
+|NONE - no TLS (MicroPython limitation)
+
+|**Malicious Tool Arguments**
+|Hardware damage (e.g., LED overbrightness)
+|LOW
+|Input validation in tool executors
+|===
+
+**Future Security (v1.0+):**
+- API key in HTTP header
+- IP whitelist
+- TLS (if MicroPython adds support)

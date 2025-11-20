@@ -1,0 +1,487 @@
+= 4-Week Learning Journey
+:toc:
+
+== Overview
+
+This guide takes a new senior developer from **zero knowledge** to **independent contributor** on the K10 MCP Server project in 4 weeks.
+
+**Assumptions:**
+
+* Strong Python experience
+* Basic embedded systems knowledge helpful
+* Comfortable with HTTP/REST APIs
+* Willingness to learn by doing
+
+== Week 1: System Overview
+
+**Goal:** Understand WHAT the system does and WHY it exists
+
+=== Day 1-2: Conceptual Understanding
+
+**Reading (4 hours):**
+
+1. link:../arc42/01-introduction.adoc[01-introduction.adoc] - Vision, goals, stakeholders
+2. link:../arc42/03-context.adoc[03-context.adoc] - System boundaries, interfaces
+3. Main README.md (project root)
+
+**Hands-On (2 hours):**
+
+1. Set up K10 hardware
+2. Upload `k10-mcp-server.py` as `main.py`
+3. Configure WiFi in `boot.py`
+4. Watch startup on K10 display
+
+**Validation Questions:**
+
+> Q1: What problem does this project solve that a traditional IoT gateway doesn't?
+>
+> *Expected answer:* Eliminates need for gateway computer by running MCP server directly on embedded device
+
+> Q2: Why is MCP better than custom REST API for this use case?
+>
+> *Expected answer:* Tool discoverability via `tools/list`, standardized protocol, Claude Desktop native support
+
+> Q3: Name 3 quality goals and why they matter.
+>
+> *Expected answer:* 1) Resource efficiency (512KB RAM limit), 2) Protocol compliance (Claude compatibility), 3) Developer experience (hobbyist-friendly)
+
+---
+
+=== Day 3-4: Architecture Deep Dive
+
+**Reading (4 hours):**
+
+1. link:../arc42/04-solution-strategy.adoc[04-solution-strategy.adoc] - Top 5 decisions
+2. link:../arc42/05-building-blocks.adoc[05-building-blocks.adoc] - Components
+3. All ADRs in link:../arc42/09-decisions/[09-decisions/]
+
+**Hands-On (3 hours):**
+
+1. Run `test_k10_mcp.py` from your PC
+2. Use `curl` to call `/mcp` endpoint
+3. Add debug prints to `execute_tool()`, watch REPL
+
+**Validation Questions:**
+
+> Q4: Draw the component diagram from memory. Label: HTTP Server, Protocol Handler, Tool Executors, HAL, Hardware
+>
+> *Expected answer:* [Should match diagram in 05-building-blocks.adoc]
+
+> Q5: Why did we choose HTTP over SSE transport?
+>
+> *Expected answer:* SSE immature in MicroPython, caused connection drops, HTTP simpler/more reliable (ADR-001)
+
+> Q6: Why is tool execution synchronous instead of async?
+>
+> *Expected answer:* Hardware fast (<10ms), avoids I2C bus collision, simpler code, no real benefit from async (ADR-003)
+
+---
+
+=== Day 5: Mental Models
+
+**Reading (3 hours):**
+
+1. link:../arc42/08-concepts.adoc[08-concepts.adoc] - Must-understand concepts
+2. link:common-issues.adoc[common-issues.adoc] - Troubleshooting patterns
+
+**Hands-On (3 hours):**
+
+1. Break something on purpose (e.g., disconnect sensor)
+2. Watch how errors propagate
+3. Fix using troubleshooting guide
+
+**Validation Questions:**
+
+> Q7: What's the "core metaphor" for this system?
+>
+> *Expected answer:* Universal translator between AI language (tool calls) and hardware language (I2C commands)
+
+> Q8: Explain why tools are stateless. Give example of what you CANNOT do.
+>
+> *Expected answer:* No state between calls. Cannot implement "toggle LED" without client tracking state.
+
+> Q9: User says "Turn LED red". Trace the data flow from Claude to hardware.
+>
+> *Expected answer:* Claude → tools/call JSON-RPC → HTTP POST /mcp → handle_mcp_request → execute_tool → rgb.write → I2C → LED
+
+---
+
+=== Week 1 Milestone: Present System Overview
+
+**Deliverable:** 10-minute presentation to team (or write-up if solo)
+
+**Topics to cover:**
+
+1. System vision (1 slide)
+2. Architecture diagram (1 slide)
+3. Key design decisions (3 slides)
+4. Demo of tool call flow (live or recorded)
+
+**Success criteria:** Can explain system to another developer who has never seen it
+
+---
+
+== Week 2: Code Fundamentals
+
+**Goal:** Understand HOW the code works and WHERE things are
+
+=== Day 6-7: HTTP Layer
+
+**Reading (2 hours):**
+
+1. Microdot documentation
+2. Code: `k10-mcp-server.py` lines 338-420 (HTTP routes)
+
+**Hands-On (4 hours):**
+
+1. Add a new HTTP endpoint `/status` that returns server uptime
+2. Test CORS by calling from browser console
+3. Add logging to `mcp_endpoint()`, watch request flow
+
+**Validation Questions:**
+
+> Q10: What does the `@app.route()` decorator do?
+>
+> *Expected answer:* Registers function to handle HTTP requests to specific path/method
+
+> Q11: Why do we need an OPTIONS handler for `/mcp`?
+>
+> *Expected answer:* CORS preflight check when browser makes cross-origin POST
+
+> Q12: Where is the session ID stored, and what happens if it's missing?
+>
+> *Expected answer:* `sessions` dict in RAM. If missing on `initialize`, server generates new ID (line 356)
+
+---
+
+=== Day 8-9: Protocol Layer
+
+**Reading (2 hours):**
+
+1. JSON-RPC 2.0 spec
+2. MCP specification (tools section)
+3. Code: `handle_mcp_request()` (lines 283-335)
+
+**Hands-On (4 hours):**
+
+1. Add a new MCP method `server/info` that returns server stats
+2. Test with curl
+3. Add error handling for malformed JSON
+
+**Validation Questions:**
+
+> Q13: What's the difference between a JSON-RPC error and an MCP tool error?
+>
+> *Expected answer:* JSON-RPC error = protocol-level (unknown method, parse error). Tool error = wrapped in result with `isError: true`
+
+> Q14: How does Claude know what arguments `set_rgb_led` needs?
+>
+> *Expected answer:* Calls `tools/list`, reads `inputSchema` from TOOLS array
+
+> Q15: Modify code to reject requests with invalid `jsonrpc` field. Where would you add this check?
+>
+> *Expected answer:* In `handle_mcp_request()` at start, before method dispatch
+
+---
+
+=== Day 10: Tool Layer
+
+**Reading (2 hours):**
+
+1. Code: `execute_tool()` (lines 168-280)
+2. Code: `TOOLS` definitions (lines 28-165)
+
+**Hands-On (4 hours):**
+
+1. Add a new tool `blink_led` (blinks LED 3 times)
+2. Add schema to `TOOLS`
+3. Test with Claude Desktop
+
+**Validation Questions:**
+
+> Q16: Why is `execute_tool()` one big function instead of separate functions per tool?
+>
+> *Expected answer:* Shared error handling, easy to see all tools, no function call overhead
+
+> Q17: What happens if a tool raises an exception?
+>
+> *Expected answer:* Caught by try/except (line 272), wrapped in `{"isError": true, "content": [...]}`
+
+> Q18: Add validation: `brightness` must be 0-9. Where in code?
+>
+> *Expected answer:* In `execute_tool()` for `set_rgb_brightness`, check before HAL call
+
+---
+
+=== Week 2 Milestone: Implement New Tool
+
+**Deliverable:** Working implementation of `get_button_state` tool
+
+**Requirements:**
+
+1. Add schema to `TOOLS` (button A or B, returns pressed/released)
+2. Implement in `execute_tool()`
+3. Test with curl and Claude Desktop
+4. Handle errors (e.g., invalid button name)
+
+**Success criteria:** Claude can respond to "Is button A pressed?"
+
+---
+
+== Week 3: Advanced Topics
+
+**Goal:** Handle edge cases, debugging, optimization
+
+=== Day 11-12: Hardware Abstraction Layer
+
+**Reading (3 hours):**
+
+1. K10 hardware datasheet (vendor docs)
+2. Code: All HAL calls in `execute_tool()`
+3. link:../arc42/08-concepts.adoc[08-concepts.adoc] - "HAL as Black Box"
+
+**Hands-On (4 hours):**
+
+1. Document what `rgb.write()` actually does (reverse engineer)
+2. Find I2C addresses for all sensors (use logic analyzer if available)
+3. Create wrapper `safe_i2c_read()` with retry logic
+
+**Validation Questions:**
+
+> Q19: What does `rgb.write(num=-1, R=255, G=0, B=0)` do?
+>
+> *Expected answer:* Sets ALL LEDs to red (num=-1 is vendor convention for "all")
+
+> Q20: Sensor read times out. How do you debug without HAL source code?
+>
+> *Expected answer:* 1) Check I2C wiring, 2) Add retry with delay, 3) Test with different sensor, 4) Document workaround
+
+> Q21: Why can't we use camera while WiFi is on?
+>
+> *Expected answer:* MicroPython ESP32 limitation, driver conflict, memory constraints (see 01-introduction.adoc constraints)
+
+---
+
+=== Day 13-14: Error Handling & Edge Cases
+
+**Reading (2 hours):**
+
+1. link:../arc42/11-risks.adoc[11-risks.adoc] - Post-mortems
+2. link:common-issues.adoc[common-issues.adoc] - Troubleshooting
+
+**Hands-On (5 hours):**
+
+1. Simulate network failure (disconnect WiFi during request)
+2. Simulate hardware failure (disconnect sensor)
+3. Simulate memory pressure (allocate large buffers)
+4. Add graceful degradation for each
+
+**Validation Questions:**
+
+> Q22: Server crashes with `MemoryError`. What are 3 debugging steps?
+>
+> *Expected answer:* 1) Add `gc.mem_free()` logging, 2) Check for leaked sessions, 3) Reduce TOOLS array size or buffer allocations
+
+> Q23: Display shows "WiFi Failed". What are likely causes and fixes?
+>
+> *Expected answer:* Wrong SSID/password, WiFi off, out of range, router reboot needed. Fix: Check boot.py config, reboot router, move closer
+
+> Q24: Tool works in curl but not Claude. What's the debugging process?
+>
+> *Expected answer:* 1) Check CORS headers, 2) Verify JSON-RPC response format, 3) Check Claude Desktop logs, 4) Test with `test_k10_mcp.py`
+
+---
+
+=== Day 15: Performance & Optimization
+
+**Reading (2 hours):**
+
+1. link:../arc42/05-building-blocks.adoc[05-building-blocks.adoc] - "Boundary Crossings"
+2. MicroPython optimization guide
+
+**Hands-On (4 hours):**
+
+1. Profile memory usage (`gc.mem_alloc()` before/after each tool)
+2. Measure latency (add timestamps to request flow)
+3. Optimize one bottleneck (e.g., reduce JSON size)
+
+**Validation Questions:**
+
+> Q25: What's the largest latency contributor in a tool call?
+>
+> *Expected answer:* Network latency (~10-15ms), then I2C sensor read (~8ms), then JSON parsing (~5ms)
+
+> Q26: How would you optimize display updates that call `clear()` + `draw_text()` 10 times?
+>
+> *Expected answer:* Batch all draws, call `show_draw()` once at end. Avoid `clear()` if redrawing same area.
+
+> Q27: Session dict grows to 100 entries. How to prevent memory leak?
+>
+> *Expected answer:* Add session expiration (timestamp + cleanup), or limit max sessions (evict oldest)
+
+---
+
+=== Week 3 Milestone: Debug Real Issue
+
+**Deliverable:** Root cause analysis of actual bug (from issues list or create one)
+
+**Format:**
+
+1. Symptom description
+2. Reproduction steps
+3. Hypothesis
+4. Investigation log
+5. Root cause
+6. Fix with test
+7. Prevention (what rule/test prevents recurrence)
+
+**Success criteria:** Fix is merged, no regression
+
+---
+
+== Week 4: Independence
+
+**Goal:** Contribute without guidance, understand development workflow
+
+=== Day 16-17: Feature Development
+
+**Task:** Implement complete feature from idea to deployment
+
+**Feature ideas (choose one):**
+
+1. Add `get_all_sensors` tool (returns temp, humidity, light in one call)
+2. Add LED animation tools (fade, rainbow, pulse)
+3. Add display drawing tools (polygon, arc)
+
+**Requirements:**
+
+1. Write ADR if architectural decision needed
+2. Add to `TOOLS` + `execute_tool()`
+3. Test with curl + Claude
+4. Update documentation
+5. Handle errors
+6. Measure memory impact
+
+---
+
+=== Day 18: Code Review Practice
+
+**Reading (2 hours):**
+
+1. link:development-workflow.adoc[development-workflow.adoc] - Review checklist
+
+**Hands-On (4 hours):**
+
+1. Review another developer's PR (or review own code critically)
+2. Check against checklist
+3. Write detailed review comments
+4. Suggest improvements (performance, readability, error handling)
+
+**Validation Questions:**
+
+> Q28: You see this code. What's wrong?
+> ```python
+> def execute_tool(name, args):
+>     if name == "read_sensor":
+>         data = sensor.read()  # Uncaught exception
+>         return {"content": [{"type": "text", "text": data}]}
+> ```
+>
+> *Expected answer:* No try/except, exception crashes server. Should wrap in try/except, return `isError: true` on failure.
+
+> Q29: Pull request adds 50KB new library. What questions do you ask?
+>
+> *Expected answer:* 1) Is it necessary? 2) Fits in RAM? 3) Tested on device? 4) Can we implement subset ourselves? 5) License compatible?
+
+---
+
+=== Day 19-20: Documentation & Knowledge Transfer
+
+**Task:** Write tutorial for next new developer
+
+**Deliverable:** New onboarding doc or improve existing
+
+**Topics:**
+
+1. Setup guide (hardware + software)
+2. First tool implementation walkthrough
+3. Common gotchas and solutions
+4. Debugging tips
+
+---
+
+=== Week 4 Milestone: Ship Feature End-to-End
+
+**Deliverable:** Complete feature in production (or demo-ready)
+
+**Checklist:**
+
+- [ ] Feature implemented and tested
+- [ ] Documentation updated
+- [ ] ADR written (if applicable)
+- [ ] No memory regressions
+- [ ] Code reviewed
+- [ ] Deployed to K10
+- [ ] Tested with Claude Desktop
+- [ ] Demo video or screenshot
+
+**Success criteria:** Another developer can use your feature without asking you questions
+
+---
+
+== Post-Onboarding: Becoming Expert
+
+After 4 weeks, you should be able to:
+
+✅ Implement new tools independently
+
+✅ Debug hardware/protocol issues
+
+✅ Make architectural decisions
+
+✅ Review others' code
+
+✅ Contribute to MCP ecosystem
+
+**Next steps:**
+
+1. **Mentorship:** Help onboard next developer
+2. **Architecture:** Propose v1.0 roadmap items
+3. **Research:** Explore Arduino version (WiFi+ML)
+4. **Community:** Write blog post, give talk
+
+== Learning Resources
+
+=== Essential Reading
+
+* MCP Specification: https://spec.modelcontextprotocol.io/
+* MicroPython Docs: https://docs.micropython.org/
+* Microdot: https://microdot.readthedocs.io/
+* JSON-RPC 2.0: https://www.jsonrpc.org/specification
+
+=== Recommended Tools
+
+* Thonny IDE (Python for embedded)
+* curl (API testing)
+* Wireshark (network debugging)
+* Logic Analyzer (I2C debugging)
+
+=== Community
+
+* K10 Discord/Forum (vendor community)
+* MCP GitHub Discussions
+* MicroPython Forum
+
+== Validation: Final Assessment
+
+**You're ready for independent work if you can:**
+
+1. ✅ Implement new tool from scratch (30 min)
+2. ✅ Debug unknown error using logs + mental model (1 hour)
+3. ✅ Explain design decisions to stakeholder (10 min presentation)
+4. ✅ Review PR and catch issues (30 min)
+5. ✅ Propose architectural improvement with ADR (2 hours)
+
+**If struggling:** Revisit Week 2-3, pair program with mentor
+
+**If excelling:** Start contributing to MCP spec or Arduino port
