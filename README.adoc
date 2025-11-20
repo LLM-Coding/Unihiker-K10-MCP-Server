@@ -8,9 +8,9 @@ It is planned to add another implementation as Arduino project.
 
 == additional information
 
-Need a case for your Unihiker-K10 board? Check out the [Unihiker-K10 Case++](https://www.printables.com/model/1486919-unihiker-k10-case) 3D printable case on Printables.com.
+Need a case for your Unihiker-K10 board? Check out the https://www.printables.com/model/1486919-unihiker-k10-case[Unihiker-K10 Case++] 3D printable case on Printables.com.
 
-![Case on Printables](https://media.printables.com/media/prints/55d1c124-1100-4612-84bd-137aa653fa54/images/11204464_eb2809b7-7a4c-4571-9317-6619e3a2b36c_cd71b5a2-0be9-4215-917f-65b674c64e8d/thumbs/inside/1600x1200/jpg/20251119_210905.webp)
+image::https://media.printables.com/media/prints/55d1c124-1100-4612-84bd-137aa653fa54/images/11204464_eb2809b7-7a4c-4571-9317-6619e3a2b36c_cd71b5a2-0be9-4215-917f-65b674c64e8d/thumbs/inside/1600x1200/jpg/20251119_210905.webp[]
 
 == Credits
 
