@@ -13,7 +13,7 @@ a->b
 
 === What's INSIDE the K10 MCP Server
 
-The system consists of code running **directly on the ESP32-S3 microcontroller** inside the UNIHIKER K10 board:
+The system consists of code running **directly on the ESP32-S3N16R8 dual-core microcontroller** inside the UNIHIKER K10 educational board:
 
 * MicroPython runtime
 * MCP JSON-RPC protocol handler
@@ -26,7 +26,7 @@ The system consists of code running **directly on the ESP32-S3 microcontroller**
 @startuml
 !include <C4/C4_Container>
 
-System_Boundary(k10, "K10 MCP Server (ESP32-S3)") {
+System_Boundary(k10, "K10 MCP Server (ESP32-S3 Dual-Core)") {
     Container(server, "HTTP Server", "Microdot", "Handles MCP requests")
     Container(protocol, "MCP Handler", "Python", "JSON-RPC processing")
     Container(tools, "Tool Executors", "Python", "Hardware control")
@@ -81,7 +81,7 @@ Rel(hal, hardware, "I2C, GPIO, SPI")
 
 Person(user, "User", "Developer/Hobbyist")
 System(claude, "Claude Desktop", "AI Assistant with MCP client")
-System(k10, "K10 MCP Server", "Embedded MCP server on ESP32-S3")
+System(k10, "K10 MCP Server", "Embedded MCP server on K12 STEM education board (ESP32-S3)")
 System_Ext(wifi, "WiFi Network", "Local network")
 System_Ext(ide, "Thonny IDE", "Development tool")
 
@@ -210,21 +210,25 @@ Rel(user, ide, "Develops code")
 |Motion detection, orientation
 |`acce.read_x/y/z()` → g-force
 
-|**2.8" TFT Display**
-|Text, graphics, status display
+|**2.8" ILI9341 TFT Display**
+|Text, graphics, status display (240×320 pixels)
 |`screen.draw_text()`, `draw_rect()`, etc.
 
 |**Buttons (A, B)**
 |User input (not yet implemented in MCP)
 |`button.read('a')` → bool
 
-|**Microphone**
-|Audio input (future feature)
-|`mic.start()`
+|**2-Microphone Array**
+|Audio input, offline speech recognition (pre-installed models)
+|`mic.start()` - Available but not exposed via MCP yet
 
 |**Speaker**
-|Audio output (future feature)
-|`speaker.play_sound()`
+|Audio output, voice feedback
+|`speaker.play_sound()` - Available but not exposed via MCP yet
+
+|**2MP Camera (OV2640)**
+|Image capture, 4 TinyML models (Face/Pet/QR/Motion detection)
+|`camera.capture()` - Cannot run with WiFi in MicroPython
 |===
 
 === 4. WiFi Interface

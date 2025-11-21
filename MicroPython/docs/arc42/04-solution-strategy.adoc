@@ -17,7 +17,7 @@ The program is the theory in the developer's mind, not the code.
 |Aspect |Details
 
 |**Context**
-|MCP spec supports 3 transports: stdio, SSE, HTTP. Embedded device has no stdin/stdout process model like desktop apps.
+|MCP spec supports 3 transports: stdio, SSE, HTTP. The K10 is a K12 STEM education board (ESP32-S3N16R8 dual-core, 512KB SRAM + 8MB PSRAM) with no stdin/stdout process model like desktop apps.
 
 |**Decision**
 |Use **HTTP streamable transport** with single `/mcp` endpoint for all JSON-RPC messages.
@@ -112,7 +112,7 @@ a|
 |Aspect |Details
 
 |**Context**
-|Tools like `display_text()` or `set_rgb_led()` complete in <10ms. Could use async/await for concurrency.
+|Tools like `display_text()` or `set_rgb_led()` complete in <10ms on the dual-core ESP32-S3. Could use async/await for concurrency.
 
 |**Decision**
 |Synchronous blocking execution: receive request → execute tool → return response.
@@ -160,7 +160,7 @@ async def execute_tool(name, args):
 |Aspect |Details
 
 |**Context**
-|MCP uses sessions to maintain state between client and server. Need to store session IDs.
+|MCP uses sessions to maintain state between client and server. Need to store session IDs efficiently given memory constraints (512KB SRAM + 8MB PSRAM).
 
 |**Decision**
 |Simple Python dictionary: `sessions = {}` in RAM.
@@ -205,7 +205,7 @@ a|
 |Aspect |Details
 
 |**Context**
-|14 tools need JSON Schema definitions for MCP discovery. Could store in JSON file or Python dict.
+|14 tools need JSON Schema definitions for MCP discovery (with more planned: camera, AI models, audio). Could store in JSON file or Python dict.
 
 |**Decision**
 |Define `TOOLS = [...]` as Python list of dicts in `k10-mcp-server.py`.
@@ -283,10 +283,10 @@ These decisions reflect deeper architectural principles:
 |Principle |How It Shaped Decisions
 
 |**KISS (Keep It Simple, Stupid)**
-|Single endpoint, synchronous execution, in-memory storage
+|Single endpoint, synchronous execution, in-memory storage - critical for educational reliability
 
 |**Resource Constraints**
-|Avoided async overhead, no database, minimal dependencies
+|Avoided async overhead, no database, minimal dependencies - 512KB SRAM requires careful memory management
 
 |**Developer Experience**
 |HTTP = curl-testable, schemas in code = easy navigation

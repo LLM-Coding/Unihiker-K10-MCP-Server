@@ -20,7 +20,7 @@ Container_Boundary(server, "K10 MCP Server") {
 }
 
 Component_Ext(client, "MCP Client", "Claude Desktop")
-Component_Ext(hardware, "K10 Hardware", "ESP32-S3 + peripherals")
+Component_Ext(hardware, "K10 Hardware", "ESP32-S3 dual-core + integrated peripherals")
 
 Rel(client, http, "POST /mcp", "JSON-RPC")
 Rel(http, protocol, "parse_request()")
@@ -252,7 +252,7 @@ def execute_tool(name, arguments):
 
 |**Display Control**
 |`display_text`, `clear_display`, `set_display_background`, `draw_line`, `draw_rectangle`, `draw_circle`
-|2.8" TFT (SPI, ST7789 driver)
+|2.8" ILI9341 TFT (240×320, SPI)
 |===
 
 **Argument Validation:**
@@ -308,7 +308,7 @@ Each tool validates input against its `inputSchema`:
 
 |`screen`
 |`init()`, `clear()`, `draw_text()`, `show_draw()`
-|ST7789 TFT display
+|ILI9341 TFT display (240×320)
 
 |`rgb`
 |`write(num, R, G, B)`, `clear()`, `brightness(level)`
@@ -334,13 +334,13 @@ Each tool validates input against its `inputSchema`:
 |`read('a')`, `read('b')`
 |GPIO pins (pull-up resistors)
 
-|`camera` (unused)
+|`camera`
 |`capture()`, `init()`
-|OV2640 camera (conflicts with WiFi!)
+|OV2640 2MP camera + 4 TinyML models (Face/Pet/QR/Motion) - Cannot run with WiFi in MicroPython!
 
-|`speaker`, `mic` (unused)
-|`play_sound()`, `start()`
-|I2S audio (future feature)
+|`speaker`, `mic`
+|`play_sound()`, `start()`, speech recognition
+|I2S audio: 2-microphone array + speaker (offline speech recognition available, not exposed via MCP yet)
 |===
 
 **Dependency Graph:**
@@ -373,11 +373,16 @@ package "Hardware" {
 
 [WARNING]
 ====
-**WiFi vs Camera Conflict:** Cannot use both simultaneously in MicroPython
+**WiFi vs Camera/TinyML Conflict:** Cannot use both simultaneously in MicroPython
 
-*Root Cause:* ESP32 memory constraints, driver conflicts
+*Root Cause:* MicroPython driver/memory conflicts on ESP32-S3 (hardware supports both, but not in current MicroPython implementation)
 
-*Workaround:* Separate Arduino sketch for AI/ML features (planned)
+*Hardware Available:*
+- 2MP OV2640 camera
+- 4 pre-installed TinyML models: Face Detection, Pet Recognition (Cat/Dog), QR Code Scanning, Motion Sensing
+- 512KB SRAM + 8MB PSRAM (PSRAM needed for ML models)
+
+*Workaround:* Separate Arduino implementation planned to enable WiFi + AI/ML features simultaneously
 ====
 
 **Design Rationale:**

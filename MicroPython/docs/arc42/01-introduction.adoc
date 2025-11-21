@@ -3,7 +3,22 @@
 
 == System Vision and Purpose
 
-The K10 MCP Server is an **embedded Model Context Protocol (MCP) server** that runs directly on the UNIHIKER K10 development board (ESP32-S3). It enables AI assistants like Claude to control physical hardware without an intermediate gateway computer.
+The K10 MCP Server is an **embedded Model Context Protocol (MCP) server** that runs directly on the UNIHIKER K10, a comprehensive K12 STEM education board. The K10 is designed for teaching AI, IoT, and physical computing to students in grades 3-12.
+
+**Hardware Overview:**
+
+* **Processor:** ESP32-S3N16R8 dual-core Tensilica LX7 @ 240 MHz
+* **Memory:** 512KB SRAM + 8MB PSRAM + 16MB Flash
+* **Display:** 2.8" ILI9341 TFT (240×320 pixels)
+* **Camera:** 2MP OV2640
+* **Audio:** 2-microphone array + speaker (offline speech recognition)
+* **Sensors:** AHT20 (temp/humidity), LTR-303ALS (light), LIS2DW12 (accelerometer)
+* **Connectivity:** WiFi 2.4GHz, Bluetooth 5.0
+* **Expansion:** Micro:bit-compatible edge connector, Gravity 3pin/4pin ports (DFRobot ecosystem)
+* **AI Features:** 4 pre-installed TinyML models (Face Detection, Pet Recognition, QR Code, Motion Detection)
+* **Programming:** Mind+ (block-based), MicroPython, Arduino (via Arduino IDE)
+
+The MCP server enables AI assistants like Claude to control this integrated educational platform without an intermediate gateway computer.
 
 [quote]
 *Vision:* Bridge the gap between Large Language Models and physical IoT devices by implementing a standards-based protocol directly on resource-constrained embedded hardware.
@@ -45,7 +60,7 @@ Claude Desktop ← HTTP/MCP → K10 Device (ESP32-S3)
 
 |1
 |**Resource Efficiency**
-|Must run on ESP32-S3 with 512KB RAM and MicroPython constraints. Every byte counts.
+|Must run on ESP32-S3 with 512KB SRAM + 8MB PSRAM and MicroPython constraints. Memory management critical for educational reliability.
 
 |2
 |**Protocol Compliance**
@@ -143,16 +158,16 @@ Claude Desktop ← HTTP/MCP → K10 Device (ESP32-S3)
 |Constraint |Description |Impact
 
 |**ESP32-S3 Memory**
-|512KB RAM total, ~100KB available after OS
-|Cannot implement full MCP spec (e.g., large resource streaming)
+|512KB SRAM + 8MB PSRAM, ~100KB SRAM available after OS (PSRAM for ML)
+|Cannot implement full MCP spec (e.g., large resource streaming). PSRAM available but used by TinyML models.
 
 |**MicroPython Limitations**
 |No asyncio SSL, limited stdlib, slower than CPython
 |No TLS support, must implement workarounds
 
 |**WiFi vs ML Conflict**
-|MicroPython on K10 cannot use WiFi + TensorFlow simultaneously
-|Need separate Arduino implementation for AI features
+|MicroPython on K10 cannot use WiFi + camera/TinyML simultaneously (driver/memory conflict)
+|Need separate Arduino implementation to enable WiFi + AI features together. Hardware supports both, but not in MicroPython.
 
 |**JSON-RPC Only**
 |MCP spec allows JSON-RPC; we cannot do efficient binary protocols
