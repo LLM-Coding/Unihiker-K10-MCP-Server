@@ -1,0 +1,28 @@
+{
+  "name": "Unihiker K10 MCP Server Development",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "asciidoctor.asciidoctor-vscode"
+      ],
+      "settings": {
+        "asciidoc.extensions.enableKroki": true,
+        "asciidoc.preview.attributes": {
+          "kroki-server-url": "https://kroki.io",
+          "allow-uri-read": true
+        },
+        "asciidoc.preview.refreshInterval": 2000
+      }
+    }
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.11"
+    }
+  },
+
+  "postCreateCommand": "echo 'Development environment ready!'"
+}
