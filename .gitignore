@@ -1,0 +1,4 @@
+# VSCode AsciiDoc Plugin - Kroki temporary diagram files
+# These are auto-generated from .adoc files and should not be committed
+MicroPython/docs/arc42/*.svg
+MicroPython/docs/arc42/**/*.svg
